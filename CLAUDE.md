@@ -4,57 +4,91 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Descripción general
 
-Herramientas de automatización para descargar certificados de antecedentes de entidades gubernamentales colombianas. Stack: **Python + Playwright + playwright-stealth + CapSolver**.
+Dos capas de código para el mismo propósito — descargar certificados de antecedentes de 4 entidades gubernamentales colombianas:
 
-| Script | Entidad | CAPTCHA |
-|--------|---------|---------|
-| `descargar_antecedentes.py` | Policía Nacional — antecedentes judiciales | reCAPTCHA Enterprise (CapSolver) |
-| `descargar_contraloria.py` | Contraloría General | reCAPTCHA v2 Enterprise (CapSolver) |
-| `descargar_procuraduria.py` | Procuraduría General | Captcha de texto (resuelto localmente) |
-| `descargar_medidas_correctivas.py` | Policía Nacional — RNMC medidas correctivas | reCAPTCHA o imagen (auto-detección) |
+- **Scripts raíz** (`descargar_*.py`): borradores standalone con `headless=False`, útiles para depurar selectores y flujos. Son la referencia cuando algo falla en la app.
+- **`web_app/`**: aplicación FastAPI de producción con interfaz web, headless=True, y deploy en Railway vía Docker.
 
-## Instalación y ejecución
+| Entidad | Módulo web_app | CAPTCHA |
+|---------|---------------|---------|
+| Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA Enterprise (CapSolver) |
+| Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 Enterprise (CapSolver) |
+| Procuraduría General | `scripts/procuraduria.py` | Texto (resuelto localmente) |
+| Policía — RNMC medidas correctivas | `scripts/medidas_correctivas.py` | Ninguno (requiere fecha de expedición) |
+
+## Comandos
 
 ```bash
-# Instalar dependencias base
-pip install playwright capsolver playwright-stealth
-playwright install chromium
+# Desarrollo local (desde web_app/)
+cd web_app
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000
 
-# Opcional: OCR para captcha de imagen (medidas correctivas)
-pip install ddddocr
+# Prueba directa de un módulo sin levantar el servidor
+cd web_app
+python -c "
+import asyncio
+from scripts.medidas_correctivas import descargar
+asyncio.run(descargar('1114480905', '05', '06', '2006', '/tmp/test'))
+"
 
-# Ejecutar cada script
-python descargar_antecedentes.py
-python descargar_contraloria.py
-python descargar_procuraduria.py
-python descargar_medidas_correctivas.py
+# Prueba paralela de los 4 módulos (simula lo que hace el servidor)
+cd web_app
+python -c "
+import asyncio, os
+from scripts import antecedentes, contraloria, procuraduria, medidas_correctivas
+KEY = 'CAP-...'
+OUT = '/tmp/test'
+os.makedirs(OUT, exist_ok=True)
+async def run():
+    results = await asyncio.gather(
+        antecedentes.descargar('CEDULA', OUT, KEY),
+        contraloria.descargar('CEDULA', OUT, KEY),
+        procuraduria.descargar('CEDULA', 'NOMBRE', OUT),
+        medidas_correctivas.descargar('CEDULA', 'DD', 'MM', 'YYYY', OUT),
+        return_exceptions=True
+    )
+    [print(n, ':', r) for n, r in zip(['ant','con','pro','med'], results)]
+asyncio.run(run())
+"
+
+# Build Docker local
+docker build -f web_app/Dockerfile -t hack-app .
+docker run -p 8000:8000 -e CAPSOLVER_API_KEY=CAP-... hack-app
 ```
 
-Los archivos generados (PNG, PDF, HTML de depuración) se guardan en `~/Downloads/antecedentes/`.
+## Arquitectura web_app
 
-## Configuración
+```
+web_app/
+├── main.py          # FastAPI: rutas /api/submit, /api/status/{id}, /api/download/{id}
+├── runner.py        # Orquesta las 4 descargas en paralelo (asyncio.gather + Semaphore(2))
+├── scripts/         # Un módulo por entidad, cada uno expone descargar() async
+└── static/          # Frontend vanilla JS: formulario → polling cada 3s → descarga ZIP
+```
 
-Cada script tiene una sección `# CONFIGURACION` al inicio con variables para modificar:
+**Flujo de un job:**
+1. `POST /api/submit` → crea UUID, guarda `jobs/{uuid}/status.json`, lanza `run_job()` en background
+2. `run_job()` ejecuta los 4 `descargar()` en paralelo con timeout de 180s cada uno
+3. Archivos exitosos se empaquetan en `certificados_{cedula}.zip`
+4. `GET /api/status/{uuid}` devuelve el estado; cuando `"done"` incluye `download_url`
+5. `GET /api/download/{uuid}` sirve el ZIP
+6. Jobs se limpian automáticamente después de 2 horas (`cleanup_loop`)
 
-- `CAPSOLVER_API_KEY` — clave de la API de CapSolver (requerida en Policía y Contraloría)
-- `CEDULA` — número de documento a consultar
-- `PRIMER_NOMBRE` — usado por la Procuraduría para resolver su captcha
-- `DIRECTORIO_DESCARGA` — carpeta de salida (por defecto `~/Downloads/antecedentes`)
-- `headless` en `browser.launch()` — cambiar a `True` para obtener PDF directo vía Chromium
+**Variables de entorno (Railway):**
+- `CAPSOLVER_API_KEY` — requerida para Policía y Contraloría
+- `PORT` — inyectada automáticamente por Railway
 
-## Arquitectura
+## Quirks importantes por entidad
 
-Todos los scripts siguen el mismo patrón asíncrono:
+**Contraloría**: el formulario vive en un iframe de `cfiscal.contraloria.gov.co`. El módulo espera hasta 30s en loop para que el iframe aparezca antes de fallar.
 
-1. `async with async_playwright()` → lanza Chromium con flags anti-detección
-2. `Stealth().apply_stealth_async(page)` → oculta huellas de automatización
-3. Navegación + llenado de formulario
-4. Resolución de CAPTCHA (CapSolver o lógica local)
-5. Inyección del token / envío del formulario
-6. Captura del resultado como PDF o PNG (fallback)
+**Procuraduría**: `resolver_captcha()` resuelve por regex 5 tipos de pregunta (matemáticas, dígitos de cédula, letras del nombre, capitales de departamento incluyendo "Colombia" → "Bogota"). Si llega una pregunta no reconocida lanza `ValueError`.
 
-**Formularios en iframe**: Contraloría embebe el formulario en `cfiscal.contraloria.gov.co`. El script localiza el frame por URL con `page.frame(url="*cfiscal.contraloria.gov.co*")`.
+**RNMC (medidas correctivas)**: el sitio usa ASP.NET UpdatePanel. El botón "Consultar" aparece con id `btnConsultar2` al seleccionar Cédula (value=55). El click se hace con `__doPostBack('ctl00$ContentPlaceHolder3$btnConsultar2','')` directamente vía JS para evitar problemas con overlays y referencias stale del DOM.
 
-**Captcha de la Procuraduría**: `resolver_captcha()` en `descargar_procuraduria.py` resuelve 5 tipos de preguntas mediante regex (operaciones matemáticas, dígitos del documento, letras del nombre, capitales de departamento). No requiere CapSolver.
+**headless vs headed**: todos los módulos de `web_app/scripts/` usan `headless=True`. Los scripts raíz usan `headless=False` para depuración visual. `page.pdf()` solo funciona en headless; en headed cae a `page.screenshot()`.
 
-**Modo headless y PDF**: `page.pdf()` solo funciona con `headless=True`. En modo visible (`headless=False`) el script cae al fallback de PNG automáticamente.
+## Deploy Railway
+
+El `railway.toml` apunta al Dockerfile en `web_app/Dockerfile`. Railway construye desde la raíz del repo, por eso el Dockerfile usa `COPY web_app/requirements.txt .` y `COPY web_app/ .`. La imagen base es `mcr.microsoft.com/playwright/python:v{VERSION}-jammy` — versión debe coincidir con `playwright>=` en `requirements.txt`.
