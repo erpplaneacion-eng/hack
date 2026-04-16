@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Certificados de Antecedentes Colombia</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --amarillo: #FCD116;
+      --azul: #003087;
+      --rojo: #CE1126;
+      --gris: #f5f5f5;
+      --texto: #1a1a2e;
+      --borde: #ddd;
+      --verde: #2e7d32;
+      --error: #b71c1c;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--gris);
+      color: var(--texto);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: var(--azul);
+      color: white;
+      padding: 0;
+      border-bottom: 6px solid var(--amarillo);
+    }
+
+    .header-banda {
+      height: 8px;
+      background: linear-gradient(to right, var(--amarillo) 33.3%, var(--azul) 33.3% 66.6%, var(--rojo) 66.6%);
+    }
+
+    .header-content {
+      padding: 1.2rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .header-content h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+
+    .header-content p {
+      font-size: 0.8rem;
+      opacity: 0.8;
+      margin-top: 2px;
+    }
+
+    .escudo {
+      font-size: 2.4rem;
+      line-height: 1;
+    }
+
+    main {
+      flex: 1;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 2.5rem 1rem;
+    }
+
+    .card {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      padding: 2.5rem;
+      width: 100%;
+      max-width: 480px;
+    }
+
+    .card h2 {
+      font-size: 1.15rem;
+      color: var(--azul);
+      margin-bottom: 0.3rem;
+    }
+
+    .card .subtitulo {
+      font-size: 0.82rem;
+      color: #666;
+      margin-bottom: 1.8rem;
+      line-height: 1.5;
+    }
+
+    .entidades {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-bottom: 1.8rem;
+    }
+
+    .badge {
+      background: #e8f0fe;
+      color: var(--azul);
+      font-size: 0.72rem;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+    }
+
+    label {
+      display: block;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--texto);
+      margin-bottom: 0.35rem;
+    }
+
+    input {
+      display: block;
+      width: 100%;
+      padding: 0.65rem 0.9rem;
+      border: 1.5px solid var(--borde);
+      border-radius: 8px;
+      font-size: 0.95rem;
+      color: var(--texto);
+      transition: border-color 0.2s;
+      margin-bottom: 1.1rem;
+      background: white;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: var(--azul);
+    }
+
+    input.error {
+      border-color: var(--error);
+    }
+
+    .campo-hint {
+      font-size: 0.73rem;
+      color: #888;
+      margin-top: -0.8rem;
+      margin-bottom: 1rem;
+    }
+
+    .error-msg {
+      color: var(--error);
+      font-size: 0.78rem;
+      margin-top: -0.8rem;
+      margin-bottom: 0.8rem;
+      display: none;
+    }
+
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 0.85rem;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+    }
+
+    .btn:active { transform: scale(0.98); }
+
+    .btn-primary {
+      background: var(--azul);
+      color: white;
+    }
+
+    .btn-primary:hover { background: #00256e; }
+
+    .btn-primary:disabled {
+      background: #aaa;
+      cursor: not-allowed;
+    }
+
+    .btn-descarga {
+      background: var(--verde);
+      color: white;
+      margin-top: 1rem;
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+    }
+
+    .btn-descarga:hover { background: #1b5e20; }
+
+    /* Pantalla spinner */
+    .spinner-wrap {
+      text-align: center;
+      padding: 1rem 0;
+    }
+
+    .spinner {
+      width: 56px;
+      height: 56px;
+      border: 5px solid #e0e0e0;
+      border-top-color: var(--azul);
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+      margin: 0 auto 1.2rem;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .spinner-titulo {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: var(--azul);
+      margin-bottom: 0.4rem;
+    }
+
+    .spinner-sub {
+      font-size: 0.82rem;
+      color: #666;
+      line-height: 1.6;
+    }
+
+    .progreso-lista {
+      list-style: none;
+      margin-top: 1.5rem;
+      text-align: left;
+    }
+
+    .progreso-lista li {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.45rem 0;
+      font-size: 0.85rem;
+      border-bottom: 1px solid #f0f0f0;
+    }
+
+    .progreso-lista li:last-child { border-bottom: none; }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #ccc;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* Pantalla resultado */
+    .resultado-icon {
+      font-size: 3rem;
+      text-align: center;
+      margin-bottom: 0.8rem;
+    }
+
+    .resultado-titulo {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--verde);
+      text-align: center;
+      margin-bottom: 0.4rem;
+    }
+
+    .resultado-titulo.fallo { color: var(--error); }
+
+    .resultado-sub {
+      font-size: 0.82rem;
+      color: #666;
+      text-align: center;
+      margin-bottom: 1.2rem;
+    }
+
+    .archivos-lista {
+      list-style: none;
+      margin: 0.8rem 0;
+    }
+
+    .archivos-lista li {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.83rem;
+      padding: 0.35rem 0;
+      border-bottom: 1px solid #f0f0f0;
+    }
+
+    .archivos-lista li:last-child { border-bottom: none; }
+
+    .check { color: var(--verde); font-weight: 700; }
+    .cruz  { color: var(--error); font-weight: 700; }
+
+    .errores-box {
+      background: #fff3f3;
+      border: 1px solid #ffcdd2;
+      border-radius: 8px;
+      padding: 0.8rem 1rem;
+      margin-top: 1rem;
+    }
+
+    .errores-box p {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--error);
+      margin-bottom: 0.4rem;
+    }
+
+    .errores-box ul {
+      list-style: none;
+      font-size: 0.76rem;
+      color: #555;
+      line-height: 1.7;
+    }
+
+    .btn-reintentar {
+      background: white;
+      color: var(--azul);
+      border: 2px solid var(--azul);
+      margin-top: 0.8rem;
+    }
+
+    .btn-reintentar:hover { background: #e8f0fe; }
+
+    footer {
+      text-align: center;
+      padding: 1rem;
+      font-size: 0.72rem;
+      color: #999;
+      border-top: 1px solid #eee;
+    }
+
+    /* Estado de pantallas */
+    .pantalla { display: none; }
+    .pantalla.activa { display: block; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-banda"></div>
+  <div class="header-content">
+    <div class="escudo">🇨🇴</div>
+    <div>
+      <h1>Certificados de Antecedentes</h1>
+      <p>Consulta automática en entidades gubernamentales colombianas</p>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+
+    <!-- Pantalla 1: Formulario -->
+    <div id="pantalla-form" class="pantalla activa">
+      <h2>Consultar antecedentes</h2>
+      <p class="subtitulo">
+        Ingresa tus datos y el sistema consultará automáticamente las 4 entidades.
+        El proceso tarda aproximadamente 2 a 3 minutos.
+      </p>
+
+      <div class="entidades">
+        <span class="badge">Policía Nacional</span>
+        <span class="badge">Contraloría</span>
+        <span class="badge">Procuraduría</span>
+        <span class="badge">RNMC Medidas</span>
+      </div>
+
+      <form id="consulta-form" novalidate>
+        <label for="cedula">Número de cédula</label>
+        <input type="text" id="cedula" placeholder="Ej: 1114480905" inputmode="numeric" maxlength="12" />
+        <div class="error-msg" id="err-cedula">Ingresa un número de cédula válido</div>
+
+        <label for="fecha">Fecha de expedición</label>
+        <input type="text" id="fecha" placeholder="DD/MM/YYYY" maxlength="10" />
+        <div class="campo-hint">Formato: día/mes/año  —  Ej: 05/06/2006</div>
+        <div class="error-msg" id="err-fecha">Ingresa la fecha en formato DD/MM/YYYY</div>
+
+        <label for="nombre">Primer nombre</label>
+        <input type="text" id="nombre" placeholder="Ej: DIEGO" />
+        <div class="campo-hint">Solo el primer nombre, en mayúsculas o minúsculas</div>
+        <div class="error-msg" id="err-nombre">El primer nombre es requerido</div>
+
+        <button type="submit" class="btn btn-primary" id="btn-consultar">Consultar ahora</button>
+      </form>
+    </div>
+
+    <!-- Pantalla 2: Procesando -->
+    <div id="pantalla-proceso" class="pantalla">
+      <div class="spinner-wrap">
+        <div class="spinner"></div>
+        <p class="spinner-titulo">Consultando entidades...</p>
+        <p class="spinner-sub">
+          Estamos consultando las 4 entidades en paralelo.<br>
+          Por favor espera, esto puede tomar 2 a 3 minutos.
+        </p>
+        <ul class="progreso-lista">
+          <li><span class="dot"></span> Policía Nacional — antecedentes judiciales</li>
+          <li><span class="dot"></span> Contraloría General de la República</li>
+          <li><span class="dot"></span> Procuraduría General de la Nación</li>
+          <li><span class="dot"></span> Policía Nacional — Medidas Correctivas</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Pantalla 3: Resultado -->
+    <div id="pantalla-resultado" class="pantalla">
+      <div class="resultado-icon" id="resultado-icon">✅</div>
+      <p class="resultado-titulo" id="resultado-titulo">Certificados listos</p>
+      <p class="resultado-sub" id="resultado-sub"></p>
+
+      <ul class="archivos-lista" id="archivos-lista"></ul>
+
+      <a href="#" class="btn btn-descarga" id="btn-descarga" style="display:none">
+        ⬇ Descargar ZIP
+      </a>
+
+      <div class="errores-box" id="errores-box" style="display:none">
+        <p>Errores durante la consulta:</p>
+        <ul id="errores-lista"></ul>
+      </div>
+
+      <button class="btn btn-reintentar" onclick="reiniciar()">Hacer otra consulta</button>
+    </div>
+
+  </div>
+</main>
+
+<footer>
+  Herramienta de automatización de consultas públicas — uso personal
+</footer>
+
+<script>
+  let pollingInterval = null;
+  let jobId = null;
+
+  // Formatear fecha automáticamente al escribir
+  document.getElementById('fecha').addEventListener('input', function(e) {
+    let val = e.target.value.replace(/\D/g, '');
+    if (val.length >= 3 && val.length <= 4) val = val.slice(0,2) + '/' + val.slice(2);
+    else if (val.length > 4) val = val.slice(0,2) + '/' + val.slice(2,4) + '/' + val.slice(4,8);
+    e.target.value = val;
+  });
+
+  document.getElementById('consulta-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    const cedula = document.getElementById('cedula').value.trim();
+    const fecha  = document.getElementById('fecha').value.trim();
+    const nombre = document.getElementById('nombre').value.trim();
+
+    // Limpiar errores previos
+    document.querySelectorAll('.error-msg').forEach(el => el.style.display = 'none');
+    document.querySelectorAll('input').forEach(el => el.classList.remove('error'));
+
+    let valido = true;
+
+    if (!/^\d{5,12}$/.test(cedula)) {
+      document.getElementById('err-cedula').style.display = 'block';
+      document.getElementById('cedula').classList.add('error');
+      valido = false;
+    }
+
+    if (!/^\d{2}\/\d{2}\/\d{4}$/.test(fecha)) {
+      document.getElementById('err-fecha').style.display = 'block';
+      document.getElementById('fecha').classList.add('error');
+      valido = false;
+    }
+
+    if (!nombre) {
+      document.getElementById('err-nombre').style.display = 'block';
+      document.getElementById('nombre').classList.add('error');
+      valido = false;
+    }
+
+    if (!valido) return;
+
+    document.getElementById('btn-consultar').disabled = true;
+
+    try {
+      const resp = await fetch('/api/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cedula: cedula,
+          fecha_expedicion: fecha,
+          primer_nombre: nombre
+        })
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json();
+        alert('Error: ' + (err.detail || 'No se pudo iniciar la consulta'));
+        document.getElementById('btn-consultar').disabled = false;
+        return;
+      }
+
+      const data = await resp.json();
+      jobId = data.job_id;
+      mostrarPantalla('pantalla-proceso');
+      iniciarPolling();
+
+    } catch (err) {
+      alert('Error de conexión: ' + err.message);
+      document.getElementById('btn-consultar').disabled = false;
+    }
+  });
+
+  function iniciarPolling() {
+    pollingInterval = setInterval(async () => {
+      try {
+        const resp = await fetch('/api/status/' + jobId);
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        if (data.status === 'done' || data.status === 'failed') {
+          clearInterval(pollingInterval);
+          mostrarResultado(data);
+        }
+      } catch (err) {
+        // Ignorar errores de red transitorios
+      }
+    }, 3000);
+  }
+
+  function mostrarResultado(data) {
+    const archivosLista = document.getElementById('archivos-lista');
+    archivosLista.innerHTML = '';
+
+    const entidades = {
+      'antecedentes': 'Policía — Antecedentes judiciales',
+      'contraloria':  'Contraloría General',
+      'procuraduria': 'Procuraduría General',
+      'medidas_correctivas': 'Policía — Medidas Correctivas',
+    };
+
+    const nombresErrores = (data.errores || []).map(e => e.entidad);
+
+    for (const [key, label] of Object.entries(entidades)) {
+      const li = document.createElement('li');
+      if (nombresErrores.includes(key)) {
+        li.innerHTML = `<span class="cruz">✗</span> ${label}`;
+      } else {
+        li.innerHTML = `<span class="check">✓</span> ${label}`;
+      }
+      archivosLista.appendChild(li);
+    }
+
+    if (data.status === 'done') {
+      document.getElementById('resultado-icon').textContent = '✅';
+      document.getElementById('resultado-titulo').textContent = 'Certificados listos';
+      document.getElementById('resultado-titulo').className = 'resultado-titulo';
+      const total = Object.keys(entidades).length;
+      const ok = total - nombresErrores.length;
+      document.getElementById('resultado-sub').textContent =
+        `Se obtuvieron ${ok} de ${total} certificados.`;
+
+      const btnDesc = document.getElementById('btn-descarga');
+      btnDesc.href = '/api/download/' + jobId;
+      btnDesc.style.display = 'flex';
+    } else {
+      document.getElementById('resultado-icon').textContent = '❌';
+      document.getElementById('resultado-titulo').textContent = 'No se pudo obtener ningún certificado';
+      document.getElementById('resultado-titulo').className = 'resultado-titulo fallo';
+      document.getElementById('resultado-sub').textContent =
+        'Todos los servicios fallaron. Intenta nuevamente más tarde.';
+    }
+
+    if (data.errores && data.errores.length > 0) {
+      const errBox = document.getElementById('errores-box');
+      const errLista = document.getElementById('errores-lista');
+      errBox.style.display = 'block';
+      errLista.innerHTML = '';
+      data.errores.forEach(e => {
+        const li = document.createElement('li');
+        li.textContent = `${e.entidad}: ${e.error}`;
+        errLista.appendChild(li);
+      });
+    }
+
+    mostrarPantalla('pantalla-resultado');
+  }
+
+  function mostrarPantalla(id) {
+    document.querySelectorAll('.pantalla').forEach(p => p.classList.remove('activa'));
+    document.getElementById(id).classList.add('activa');
+  }
+
+  function reiniciar() {
+    if (pollingInterval) clearInterval(pollingInterval);
+    jobId = null;
+    document.getElementById('consulta-form').reset();
+    document.getElementById('btn-consultar').disabled = false;
+    document.getElementById('btn-descarga').style.display = 'none';
+    document.getElementById('errores-box').style.display = 'none';
+    mostrarPantalla('pantalla-form');
+  }
+</script>
+
+</body>
+</html>

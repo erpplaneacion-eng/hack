@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "WebFetch(domain:srvcnpc.policia.gov.co)",
+      "Bash(curl -s -X POST http://localhost:8000/api/submit -H 'Content-Type: application/json' -d '{\"cedula\":\"1114480905\",\"fecha_expedicion\":\"05/06/2006\",\"primer_nombre\":\"DIEGO\"}')",
+      "Bash(uvicorn main:app --host 0.0.0.0 --port 8000)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(curl -s http://localhost:8000/)",
+      "Bash(pkill -f uvicorn)"
+    ]
+  }
+}

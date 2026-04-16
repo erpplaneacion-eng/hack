@@ -1,0 +1,9 @@
+[build]
+dockerfilePath = "web_app/Dockerfile"
+buildCommand = ""
+
+[deploy]
+startCommand = ""
+healthcheckPath = "/"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
