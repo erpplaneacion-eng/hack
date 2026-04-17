@@ -87,10 +87,20 @@ def resolver_captcha(texto: str, cedula: str, primer_nombre: str) -> str:
     raise ValueError(f"Tipo de captcha no reconocido: '{texto}'")
 
 
-async def descargar(cedula: str, primer_nombre: str, output_dir: str) -> str:
-    """Retorna ruta del archivo generado. Lanza excepción si falla."""
-    os.makedirs(output_dir, exist_ok=True)
+_ERRORES_PAGINA = [
+    "captcha incorrecto",
+    "código de verificación",
+    "no se encontr",
+    "error al procesar",
+    "intente nuevamente",
+    "datos incorrectos",
+]
 
+TAMANIO_MINIMO_PDF = 10_000  # 10 KB — un PDF válido siempre supera esto
+
+
+async def _intentar_descarga(cedula: str, primer_nombre: str, output_dir: str) -> str:
+    """Un intento completo. Lanza excepción si algo falla."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -113,95 +123,116 @@ async def descargar(cedula: str, primer_nombre: str, output_dir: str) -> str:
         page = await context.new_page()
         await Stealth().apply_stealth_async(page)
 
-        await page.goto(URL_IFRAME, wait_until="load", timeout=60_000)
-        await asyncio.sleep(2)
-
-        await page.locator("#ddlTipoID").select_option(value="1")
-        await asyncio.sleep(0.3)
-
-        campo_cedula = None
-        for selector in ["#txtNumDoc", "#numDoc", "input[name*='numDoc']",
-                         "input[name*='cedula']", "input[name*='documento']",
-                         "input[type='text']"]:
-            try:
-                el = page.locator(selector).first
-                if await el.count() > 0 and await el.is_visible():
-                    campo_cedula = el
-                    break
-            except Exception:
-                continue
-
-        if campo_cedula is None:
-            raise RuntimeError("No se encontró campo de cédula en Procuraduría")
-
-        await campo_cedula.fill(cedula)
-        await asyncio.sleep(0.3)
-
-        radios = await page.locator("input[type='radio']:visible").all()
-        if radios:
-            await radios[0].click()
-
-        texto_captcha = await page.locator("#lblPregunta").inner_text(timeout=8_000)
-        if not texto_captcha:
-            raise RuntimeError("No se encontró texto del captcha en Procuraduría")
-
-        respuesta = resolver_captcha(texto_captcha, cedula, primer_nombre.upper())
-
-        campo_captcha = None
-        for selector in ["#txtCaptcha", "#captcha", "input[name*='captcha']",
-                         "input[name*='Captcha']", "input[name*='codigo']"]:
-            try:
-                el = page.locator(selector).first
-                if await el.count() > 0 and await el.is_visible():
-                    campo_captcha = el
-                    break
-            except Exception:
-                continue
-
-        if campo_captcha is None:
-            todos_inputs = await page.locator("input[type='text']:visible").all()
-            if todos_inputs:
-                campo_captcha = todos_inputs[-1]
-
-        await campo_captcha.fill(respuesta)
-        await asyncio.sleep(0.3)
-
-        await page.locator("#btnExportar").click(timeout=8_000, force=True)
-        await page.wait_for_load_state("networkidle", timeout=30_000)
-        await asyncio.sleep(3)
-
         try:
-            await page.wait_for_function(
-                "() => !document.querySelector('.loading, #divCargando, #loading') || "
-                "      document.querySelector('.loading, #divCargando, #loading').style.display === 'none'",
-                timeout=30_000
-            )
-        except Exception:
-            pass
-        await asyncio.sleep(5)
+            await page.goto(URL_IFRAME, wait_until="load", timeout=60_000)
+            await asyncio.sleep(2)
 
-        ruta_pdf = os.path.join(output_dir, f"procuraduria_{cedula}.pdf")
+            await page.locator("#ddlTipoID").select_option(value="1")
+            await asyncio.sleep(0.3)
 
-        try:
+            campo_cedula = None
+            for selector in ["#txtNumDoc", "#numDoc", "input[name*='numDoc']",
+                             "input[name*='cedula']", "input[name*='documento']",
+                             "input[type='text']"]:
+                try:
+                    el = page.locator(selector).first
+                    if await el.count() > 0 and await el.is_visible():
+                        campo_cedula = el
+                        break
+                except Exception:
+                    continue
+
+            if campo_cedula is None:
+                raise RuntimeError("No se encontró campo de cédula en Procuraduría")
+
+            await campo_cedula.fill(cedula)
+            await asyncio.sleep(0.3)
+
+            radios = await page.locator("input[type='radio']:visible").all()
+            if radios:
+                await radios[0].click()
+
+            texto_captcha = await page.locator("#lblPregunta").inner_text(timeout=8_000)
+            if not texto_captcha:
+                raise RuntimeError("No se encontró texto del captcha en Procuraduría")
+
+            respuesta = resolver_captcha(texto_captcha, cedula, primer_nombre.upper())
+
+            campo_captcha = None
+            for selector in ["#txtCaptcha", "#captcha", "input[name*='captcha']",
+                             "input[name*='Captcha']", "input[name*='codigo']"]:
+                try:
+                    el = page.locator(selector).first
+                    if await el.count() > 0 and await el.is_visible():
+                        campo_captcha = el
+                        break
+                except Exception:
+                    continue
+
+            if campo_captcha is None:
+                todos_inputs = await page.locator("input[type='text']:visible").all()
+                if todos_inputs:
+                    campo_captcha = todos_inputs[-1]
+
+            if campo_captcha is None:
+                raise RuntimeError("No se encontró campo de captcha en Procuraduría")
+
+            await campo_captcha.fill(respuesta)
+            await asyncio.sleep(0.3)
+
+            await page.locator("#btnExportar").click(timeout=8_000, force=True)
+
+            # Esperar que #btnDescargar aparezca — esto confirma que el resultado cargó correctamente.
+            # Si no aparece en 60s, el intento falla (no hacemos fallback a pdf/screenshot).
+            try:
+                await page.locator("#btnDescargar").wait_for(state="visible", timeout=60_000)
+            except PlaywrightTimeout:
+                # Revisar si hay un mensaje de error en pantalla antes de reportar timeout
+                contenido = (await page.content()).lower()
+                for frase in _ERRORES_PAGINA:
+                    if frase in contenido:
+                        raise RuntimeError(f"Procuraduría rechazó la consulta: '{frase}' en página")
+                raise RuntimeError("Timeout esperando #btnDescargar en Procuraduría")
+
+            # Verificar que la página no muestra un error (captcha incorrecto, etc.)
+            contenido = (await page.content()).lower()
+            for frase in _ERRORES_PAGINA:
+                if frase in contenido:
+                    raise RuntimeError(f"Procuraduría devolvió error: '{frase}' en página")
+
             async with page.expect_download(timeout=30_000) as dl_info:
                 await page.locator("#btnDescargar").click(timeout=8_000)
             descarga = await dl_info.value
             nombre = descarga.suggested_filename or f"procuraduria_{cedula}.pdf"
             ruta_final = os.path.join(output_dir, nombre)
             await descarga.save_as(ruta_final)
-            await browser.close()
+
+            # Validar que el archivo descargado tiene contenido real
+            tamanio = os.path.getsize(ruta_final)
+            if tamanio < TAMANIO_MINIMO_PDF:
+                os.remove(ruta_final)
+                raise RuntimeError(
+                    f"El archivo descargado es sospechosamente pequeño ({tamanio} bytes), "
+                    "probablemente es una página de error"
+                )
+
             return ruta_final
 
-        except PlaywrightTimeout:
-            await page.wait_for_load_state("networkidle", timeout=20_000)
-            await asyncio.sleep(2)
-            try:
-                await page.pdf(path=ruta_pdf, format="A4", print_background=True,
-                               margin={"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"})
-                await browser.close()
-                return ruta_pdf
-            except Exception:
-                ruta_png = os.path.join(output_dir, f"procuraduria_{cedula}.png")
-                await page.screenshot(path=ruta_png, full_page=True)
-                await browser.close()
-                return ruta_png
+        finally:
+            await browser.close()
+
+
+async def descargar(cedula: str, primer_nombre: str, output_dir: str) -> str:
+    """Retorna ruta del archivo generado. Reintenta hasta 3 veces antes de lanzar excepción."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    ultimo_error: Exception = RuntimeError("Sin intentos realizados")
+    for intento in range(1, 4):
+        try:
+            return await _intentar_descarga(cedula, primer_nombre, output_dir)
+        except Exception as e:
+            ultimo_error = e
+            if intento < 3:
+                await asyncio.sleep(3 * intento)  # espera progresiva entre reintentos
+
+    raise RuntimeError(f"Procuraduría falló tras 3 intentos. Último error: {ultimo_error}")
