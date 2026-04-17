@@ -28,11 +28,12 @@ firebase-debug.log
 !.env.example
 
 # Scripts de desarrollo local (no van al repo de producción)
-descargar_antecedentes.py
-descargar_contraloria.py
-descargar_procuraduria.py
-descargar_medidas_correctivas.py
+descargar_*.py
 instalar_dependencias.bat
+
+# Archivos temporales de exploración / MCP
+.playwright-mcp/
+adres_scripts.txt
 
 # IDE
 .vscode/

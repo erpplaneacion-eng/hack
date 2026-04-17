@@ -6,7 +6,7 @@ import shutil
 import time
 import zipfile
 
-from scripts import antecedentes, contraloria, procuraduria, medidas_correctivas
+from scripts import antecedentes, contraloria, procuraduria, medidas_correctivas, adres
 
 CAPSOLVER_API_KEY = os.getenv(
     "CAPSOLVER_API_KEY",
@@ -37,9 +37,10 @@ async def run_job(job_id: str, job_dir: str, params: dict):
             _run(contraloria.descargar(cedula, job_dir, CAPSOLVER_API_KEY), "contraloria"),
             _run(procuraduria.descargar(cedula, primer_nombre, job_dir), "procuraduria"),
             _run(medidas_correctivas.descargar(cedula, dia, mes, anio, job_dir), "medidas_correctivas"),
+            _run(adres.descargar(cedula, job_dir), "adres"),
         )
 
-    nombres = ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas"]
+    nombres = ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas", "adres"]
     errores = []
     archivos = []
 
