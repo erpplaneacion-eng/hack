@@ -9,33 +9,34 @@ from playwright_stealth import Stealth
 
 URL_INICIO     = "https://antecedentes.policia.gov.co:7005/WebJudicial/index.xhtml"
 URL_FORMULARIO = "https://antecedentes.policia.gov.co:7005/WebJudicial/antecedentes.xhtml"
-SITEKEY_DEFAULT = "6LcsIwQaAAAAAFCsaI-dkR6hgKsZwwJRsmE0tIJH"
+SITEKEY        = "6LcsIwQaAAAAAFCsaI-dkR6hgKsZwwJRsmE0tIJH"
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 
-async def _extraer_sitekey(page) -> str:
-    sitekey = await page.evaluate("""
-        () => {
-            const el = document.querySelector('[data-sitekey]');
-            return el ? el.getAttribute('data-sitekey') : null;
-        }
-    """)
-    if sitekey:
-        return sitekey
-
-    content = await page.content()
-    match = re.search(r'recaptcha.*?[?&]k=([A-Za-z0-9_-]{30,})', content)
-    if match:
-        return match.group(1)
-
-    match = re.search(r'"sitekey"\s*:\s*"([^"]+)"', content)
-    if match:
-        return match.group(1)
-
-    match = re.search(r'sitekey[=:]\s*[\'"]([0-9A-Za-z_-]{20,})[\'"]', content)
-    if match:
-        return match.group(1)
-
-    return SITEKEY_DEFAULT
+def _resolver_captcha(api_key: str, page_url: str = URL_FORMULARIO) -> str:
+    """Llama a CapSolver — síncrono, se ejecuta en thread."""
+    capsolver.api_key = api_key
+    for tipo in [
+        "ReCaptchaV3TaskProxyless",
+        "ReCaptchaV2EnterpriseTaskProxyless",
+        "ReCaptchaV2TaskProxyless",
+    ]:
+        try:
+            payload = {"type": tipo, "websiteURL": page_url, "websiteKey": SITEKEY}
+            if tipo == "ReCaptchaV3TaskProxyless":
+                payload["pageAction"] = "verify"
+            solution = capsolver.solve(payload)
+            token = solution.get("gRecaptchaResponse", "")
+            if token:
+                return token
+        except Exception:
+            continue
+    raise RuntimeError("CapSolver no devolvió token para Policía antecedentes")
 
 
 async def _inyectar_token(page, token: str):
@@ -64,93 +65,93 @@ async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str
     """Retorna ruta del archivo generado. Lanza excepción si falla."""
     os.makedirs(output_dir, exist_ok=True)
 
+    # Lanzar CapSolver en paralelo con la carga de la página (la sitekey es constante)
+    captcha_task = asyncio.create_task(
+        asyncio.to_thread(_resolver_captcha, capsolver_api_key)
+    )
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            args=[
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
         )
         context = await browser.new_context(
             accept_downloads=True,
             viewport={"width": 1280, "height": 800},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
+            user_agent=USER_AGENT,
+        )
+        # Bloquear recursos pesados — el PDF no los necesita
+        await context.route(
+            "**/*",
+            lambda route: route.abort()
+            if route.request.resource_type in ("image", "media", "font")
+            else route.continue_(),
         )
         page = await context.new_page()
         await Stealth().apply_stealth_async(page)
 
-        await page.goto(URL_INICIO, wait_until="load", timeout=60_000)
-        await asyncio.sleep(1)
-
-        await page.locator("#aceptaOption\\:0").click(timeout=10_000)
-        await asyncio.sleep(0.5)
-        await page.locator("#continuarBtn").click(timeout=10_000)
-        await page.wait_for_load_state("load", timeout=20_000)
-        await asyncio.sleep(1)
-
-        campo = page.locator("input[type='text'], input[type='number']").first
-        await campo.wait_for(timeout=10_000)
-        await campo.fill(cedula)
-        await asyncio.sleep(3)
-
-        sitekey = await _extraer_sitekey(page)
-
-        page_url = page.url
-
-        def _resolver():
-            capsolver.api_key = capsolver_api_key
-            token = ""
-            for tipo in [
-                "ReCaptchaV3TaskProxyless",
-                "ReCaptchaV2EnterpriseTaskProxyless",
-                "ReCaptchaV2TaskProxyless",
-            ]:
-                try:
-                    payload = {"type": tipo, "websiteURL": page_url, "websiteKey": sitekey}
-                    if tipo == "ReCaptchaV3TaskProxyless":
-                        payload["pageAction"] = "verify"
-                    solution = capsolver.solve(payload)
-                    token = solution.get("gRecaptchaResponse", "")
-                    if token:
-                        break
-                except Exception:
-                    continue
-            if not token:
-                raise RuntimeError("CapSolver no devolvió token para Policía antecedentes")
-            return token
-
-        token = await asyncio.to_thread(_resolver)
-
-        await _inyectar_token(page, token)
-        await asyncio.sleep(1)
-
         try:
-            boton = page.locator(
-                "button:has-text('Consultar'), "
-                "input[value*='Consultar'], "
-                "button:has-text('Verificar'), "
-                "button[type='submit']"
-            ).first
-            await boton.click(timeout=8_000)
-        except PlaywrightTimeout:
-            await page.evaluate("document.querySelector('form').submit()")
+            await page.goto(URL_INICIO, wait_until="domcontentloaded", timeout=30_000)
 
-        await page.wait_for_load_state("load", timeout=20_000)
-        await asyncio.sleep(2)
+            # Aceptar términos y continuar
+            await page.locator("#aceptaOption\\:0").click(timeout=10_000)
+            await page.locator("#continuarBtn").click(timeout=10_000)
+            await page.wait_for_load_state("domcontentloaded", timeout=15_000)
 
-        ruta_pdf = os.path.join(output_dir, f"antecedentes_{cedula}.pdf")
-        ruta_png = os.path.join(output_dir, f"antecedentes_{cedula}.png")
+            # Llenar cédula
+            campo = page.locator("input[type='text'], input[type='number']").first
+            await campo.wait_for(timeout=10_000)
+            await campo.fill(cedula)
 
-        try:
-            await page.pdf(
-                path=ruta_pdf, format="A4", print_background=True,
-                margin={"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"},
-            )
+            # Esperar el token de CapSolver (probablemente ya está listo)
+            token = await captcha_task
+            await _inyectar_token(page, token)
+
+            # Submit
+            try:
+                boton = page.locator(
+                    "button:has-text('Consultar'), "
+                    "input[value*='Consultar'], "
+                    "button:has-text('Verificar'), "
+                    "button[type='submit']"
+                ).first
+                await boton.click(timeout=8_000)
+            except PlaywrightTimeout:
+                await page.evaluate("document.querySelector('form').submit()")
+
+            await page.wait_for_load_state("domcontentloaded", timeout=20_000)
+
+            # Esperar que aparezca contenido del resultado (no un spinner ni la misma página)
+            try:
+                await page.wait_for_function(
+                    """() => {
+                        const t = document.body.innerText.toLowerCase();
+                        return t.includes('antecedentes') && t.length > 200;
+                    }""",
+                    timeout=15_000,
+                )
+            except PlaywrightTimeout:
+                pass  # seguir y generar PDF de lo que haya
+
+            ruta_pdf = os.path.join(output_dir, f"antecedentes_{cedula}.pdf")
+            ruta_png = os.path.join(output_dir, f"antecedentes_{cedula}.png")
+
+            try:
+                await page.pdf(
+                    path=ruta_pdf, format="A4", print_background=True,
+                    margin={"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"},
+                )
+                return ruta_pdf
+            except Exception:
+                await page.screenshot(path=ruta_png, full_page=True)
+                return ruta_png
+        finally:
+            # Si el browser se cierra antes que el captcha, cancelar la tarea
+            if not captcha_task.done():
+                captcha_task.cancel()
             await browser.close()
-            return ruta_pdf
-        except Exception:
-            await page.screenshot(path=ruta_png, full_page=True)
-            await browser.close()
-            return ruta_png

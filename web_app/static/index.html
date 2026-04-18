@@ -289,14 +289,39 @@
       align-items: center;
       gap: 0.5rem;
       font-size: 0.83rem;
-      padding: 0.35rem 0;
+      padding: 0.45rem 0;
       border-bottom: 1px solid #f0f0f0;
     }
 
     .archivos-lista li:last-child { border-bottom: none; }
 
+    .archivos-lista .label-entidad {
+      flex: 1;
+    }
+
     .check { color: var(--verde); font-weight: 700; }
     .cruz  { color: var(--error); font-weight: 700; }
+
+    .btn-individual {
+      background: var(--verde);
+      color: white;
+      font-size: 0.72rem;
+      padding: 4px 10px;
+      border-radius: 6px;
+      text-decoration: none;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .btn-individual:hover { background: #1b5e20; }
+
+    .err-detalle {
+      font-size: 0.72rem;
+      color: var(--error);
+      margin-left: auto;
+      max-width: 60%;
+      text-align: right;
+    }
 
     .errores-box {
       background: #fff3f3;
@@ -363,7 +388,7 @@
       <h2>Consultar antecedentes</h2>
       <p class="subtitulo">
         Ingresa tus datos y el sistema consultará automáticamente las 5 entidades.
-        El proceso tarda aproximadamente 2 a 3 minutos.
+        Cada certificado se podrá descargar apenas esté listo (25-60 segundos en total).
       </p>
 
       <div class="entidades">
@@ -393,43 +418,25 @@
       </form>
     </div>
 
-    <!-- Pantalla 2: Procesando -->
+    <!-- Pantalla 2: Procesando + Resultado (unificadas para streaming) -->
     <div id="pantalla-proceso" class="pantalla">
       <div class="spinner-wrap">
-        <div class="spinner"></div>
-        <p class="spinner-titulo">Consultando entidades...</p>
-        <p class="spinner-sub">
-          Estamos consultando las 5 entidades en paralelo.<br>
-          Por favor espera, esto puede tomar 2 a 3 minutos.
+        <div class="spinner" id="spinner-icono"></div>
+        <p class="spinner-titulo" id="proceso-titulo">Consultando entidades...</p>
+        <p class="spinner-sub" id="proceso-sub">
+          Cada certificado podrás descargarlo apenas esté listo.<br>
+          El proceso completo tarda entre 25 y 60 segundos.
         </p>
-        <ul class="progreso-lista">
-          <li><span class="dot"></span> Policía Nacional — antecedentes judiciales</li>
-          <li><span class="dot"></span> Contraloría General de la República</li>
-          <li><span class="dot"></span> Procuraduría General de la Nación</li>
-          <li><span class="dot"></span> Policía Nacional — Medidas Correctivas</li>
-          <li><span class="dot"></span> ADRES — Afiliación EPS (BDUA)</li>
-        </ul>
+        <ul class="archivos-lista" id="archivos-lista"></ul>
+
+        <a href="#" class="btn btn-descarga" id="btn-descarga" style="display:none">
+          ⬇ Descargar todo en ZIP
+        </a>
+
+        <button class="btn btn-reintentar" id="btn-reiniciar" onclick="reiniciar()" style="display:none">
+          Hacer otra consulta
+        </button>
       </div>
-    </div>
-
-    <!-- Pantalla 3: Resultado -->
-    <div id="pantalla-resultado" class="pantalla">
-      <div class="resultado-icon" id="resultado-icon">✅</div>
-      <p class="resultado-titulo" id="resultado-titulo">Certificados listos</p>
-      <p class="resultado-sub" id="resultado-sub"></p>
-
-      <ul class="archivos-lista" id="archivos-lista"></ul>
-
-      <a href="#" class="btn btn-descarga" id="btn-descarga" style="display:none">
-        ⬇ Descargar ZIP
-      </a>
-
-      <div class="errores-box" id="errores-box" style="display:none">
-        <p>Errores durante la consulta:</p>
-        <ul id="errores-lista"></ul>
-      </div>
-
-      <button class="btn btn-reintentar" onclick="reiniciar()">Hacer otra consulta</button>
     </div>
 
   </div>
@@ -515,85 +522,100 @@
     }
   });
 
+  const ENTIDADES = {
+    'antecedentes':        'Policía — Antecedentes judiciales',
+    'contraloria':         'Contraloría General',
+    'procuraduria':        'Procuraduría General',
+    'medidas_correctivas': 'Policía — Medidas Correctivas',
+    'adres':               'ADRES — Afiliación EPS (BDUA)',
+  };
+
   function iniciarPolling() {
+    actualizarProgreso({resultados: {}});  // render inicial vacío
     pollingInterval = setInterval(async () => {
       try {
         const resp = await fetch('/api/status/' + jobId);
         if (!resp.ok) return;
         const data = await resp.json();
 
-        if (data.status === 'done' || data.status === 'failed') {
+        actualizarProgreso(data);
+
+        if (data.overall_status === 'done' || data.overall_status === 'failed') {
           clearInterval(pollingInterval);
-          mostrarResultado(data);
+          finalizarUI(data);
         }
       } catch (err) {
         // Ignorar errores de red transitorios
       }
-    }, 3000);
+    }, 1500);  // poll más frecuente para ver el streaming en tiempo real
   }
 
-  function mostrarResultado(data) {
+  function actualizarProgreso(data) {
     const archivosLista = document.getElementById('archivos-lista');
+    const resultados = data.resultados || {};
+
     archivosLista.innerHTML = '';
 
-    const entidades = {
-      'antecedentes': 'Policía — Antecedentes judiciales',
-      'contraloria':  'Contraloría General',
-      'procuraduria': 'Procuraduría General',
-      'medidas_correctivas': 'Policía — Medidas Correctivas',
-      'adres':        'ADRES — Afiliación EPS (BDUA)',
-    };
-
-    const nombresErrores = (data.errores || []).map(e => e.entidad);
-
-    for (const [key, label] of Object.entries(entidades)) {
+    for (const [key, label] of Object.entries(ENTIDADES)) {
+      const info = resultados[key] || {status: 'procesando'};
       const li = document.createElement('li');
-      if (nombresErrores.includes(key)) {
-        li.innerHTML = `<span class="cruz">✗</span> ${label}`;
+
+      if (info.status === 'done') {
+        li.innerHTML =
+          `<span class="check">✓</span>` +
+          `<span class="label-entidad">${label}</span>` +
+          `<a href="${info.download_url}" class="btn-individual" download>⬇ Descargar</a>`;
+      } else if (info.status === 'error') {
+        li.innerHTML =
+          `<span class="cruz">✗</span>` +
+          `<span class="label-entidad">${label}</span>` +
+          `<span class="err-detalle" title="${escapeHtml(info.error || '')}">${truncar(info.error || 'error', 50)}</span>`;
       } else {
-        li.innerHTML = `<span class="check">✓</span> ${label}`;
+        li.innerHTML =
+          `<span class="dot"></span>` +
+          `<span class="label-entidad">${label}</span>`;
       }
       archivosLista.appendChild(li);
     }
+  }
 
-    if (data.status === 'done') {
-      document.getElementById('resultado-icon').textContent = '✅';
-      document.getElementById('resultado-titulo').textContent = 'Certificados listos';
-      document.getElementById('resultado-titulo').className = 'resultado-titulo';
-      const total = Object.keys(entidades).length;
-      const ok = total - nombresErrores.length;
-      document.getElementById('resultado-sub').textContent =
-        `Se obtuvieron ${ok} de ${total} documentos.`;
+  function finalizarUI(data) {
+    document.getElementById('spinner-icono').style.display = 'none';
+    document.getElementById('btn-reiniciar').style.display = 'block';
 
-      const btnDesc = document.getElementById('btn-descarga');
-      btnDesc.href = '/api/download/' + jobId;
-      btnDesc.style.display = 'flex';
+    const total = Object.keys(ENTIDADES).length;
+    const ok = (data.archivos || []).length;
+
+    if (data.overall_status === 'done') {
+      document.getElementById('proceso-titulo').textContent = 'Certificados listos';
+      document.getElementById('proceso-titulo').style.color = 'var(--verde)';
+      document.getElementById('proceso-sub').innerHTML =
+        `Se obtuvieron <b>${ok}</b> de <b>${total}</b> documentos.`;
+      const btn = document.getElementById('btn-descarga');
+      btn.href = '/api/download/' + jobId;
+      btn.style.display = 'flex';
     } else {
-      document.getElementById('resultado-icon').textContent = '❌';
-      document.getElementById('resultado-titulo').textContent = 'No se pudo obtener ningún certificado';
-      document.getElementById('resultado-titulo').className = 'resultado-titulo fallo';
-      document.getElementById('resultado-sub').textContent =
+      document.getElementById('proceso-titulo').textContent = 'No se pudo obtener ningún certificado';
+      document.getElementById('proceso-titulo').style.color = 'var(--error)';
+      document.getElementById('proceso-sub').textContent =
         'Todos los servicios fallaron. Intenta nuevamente más tarde.';
     }
-
-    if (data.errores && data.errores.length > 0) {
-      const errBox = document.getElementById('errores-box');
-      const errLista = document.getElementById('errores-lista');
-      errBox.style.display = 'block';
-      errLista.innerHTML = '';
-      data.errores.forEach(e => {
-        const li = document.createElement('li');
-        li.textContent = `${e.entidad}: ${e.error}`;
-        errLista.appendChild(li);
-      });
-    }
-
-    mostrarPantalla('pantalla-resultado');
   }
 
   function mostrarPantalla(id) {
     document.querySelectorAll('.pantalla').forEach(p => p.classList.remove('activa'));
     document.getElementById(id).classList.add('activa');
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+  }
+
+  function truncar(s, n) {
+    s = String(s);
+    return s.length > n ? s.slice(0, n) + '…' : s;
   }
 
   function reiniciar() {
@@ -602,7 +624,12 @@
     document.getElementById('consulta-form').reset();
     document.getElementById('btn-consultar').disabled = false;
     document.getElementById('btn-descarga').style.display = 'none';
-    document.getElementById('errores-box').style.display = 'none';
+    document.getElementById('btn-reiniciar').style.display = 'none';
+    document.getElementById('spinner-icono').style.display = 'block';
+    document.getElementById('proceso-titulo').textContent = 'Consultando entidades...';
+    document.getElementById('proceso-titulo').style.color = '';
+    document.getElementById('proceso-sub').innerHTML =
+      'Cada certificado podrás descargarlo apenas esté listo.<br>El proceso completo tarda entre 25 y 60 segundos.';
     mostrarPantalla('pantalla-form');
   }
 </script>

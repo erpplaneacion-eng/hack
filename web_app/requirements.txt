@@ -4,3 +4,4 @@ playwright>=1.58.0
 playwright-stealth>=1.0.6
 capsolver>=1.0.0
 slowapi>=0.1.9
+httpx>=0.27.0

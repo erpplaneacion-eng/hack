@@ -15,6 +15,30 @@ CAPSOLVER_API_KEY = os.getenv(
 TIMEOUT_SEGUNDOS = 180
 
 _semaforo = asyncio.Semaphore(2)
+_status_lock = asyncio.Lock()
+
+ENTIDADES = ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas", "adres"]
+
+
+async def _update_status(job_dir: str, **cambios):
+    """Actualiza status.json de forma atómica con un lock global."""
+    status_path = os.path.join(job_dir, "status.json")
+    async with _status_lock:
+        try:
+            with open(status_path, encoding="utf-8") as f:
+                estado = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            estado = {}
+
+        for clave, valor in cambios.items():
+            if clave == "resultado_entidad":
+                entidad, datos = valor
+                estado.setdefault("resultados", {})[entidad] = datos
+            else:
+                estado[clave] = valor
+
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump(estado, f, ensure_ascii=False)
 
 
 async def run_job(job_id: str, job_dir: str, params: dict):
@@ -23,33 +47,56 @@ async def run_job(job_id: str, job_dir: str, params: dict):
     dia, mes, anio = partes[0], partes[1], partes[2]
     primer_nombre = params["primer_nombre"].upper().strip()
 
+    # Inicializar estado con todas las entidades en "procesando"
+    await _update_status(
+        job_dir,
+        overall_status="procesando",
+        resultados={e: {"status": "procesando"} for e in ENTIDADES},
+        errores=[],
+        zip=None,
+    )
+
     async def _run(coro, nombre):
         try:
-            return await asyncio.wait_for(coro, timeout=TIMEOUT_SEGUNDOS)
+            resultado = await asyncio.wait_for(coro, timeout=TIMEOUT_SEGUNDOS)
+            return nombre, resultado, None
         except asyncio.TimeoutError:
-            return Exception(f"timeout después de {TIMEOUT_SEGUNDOS}s")
+            return nombre, None, f"timeout después de {TIMEOUT_SEGUNDOS}s"
         except Exception as e:
-            return e
+            return nombre, None, str(e)
 
     async with _semaforo:
-        resultados = await asyncio.gather(
-            _run(antecedentes.descargar(cedula, job_dir, CAPSOLVER_API_KEY), "antecedentes"),
-            _run(contraloria.descargar(cedula, job_dir, CAPSOLVER_API_KEY), "contraloria"),
-            _run(procuraduria.descargar(cedula, primer_nombre, job_dir), "procuraduria"),
-            _run(medidas_correctivas.descargar(cedula, dia, mes, anio, job_dir), "medidas_correctivas"),
-            _run(adres.descargar(cedula, job_dir), "adres"),
-        )
+        tareas = [
+            asyncio.create_task(_run(antecedentes.descargar(cedula, job_dir, CAPSOLVER_API_KEY), "antecedentes")),
+            asyncio.create_task(_run(contraloria.descargar(cedula, job_dir, CAPSOLVER_API_KEY), "contraloria")),
+            asyncio.create_task(_run(procuraduria.descargar(cedula, primer_nombre, job_dir), "procuraduria")),
+            asyncio.create_task(_run(medidas_correctivas.descargar(cedula, dia, mes, anio, job_dir), "medidas_correctivas")),
+            asyncio.create_task(_run(adres.descargar(cedula, job_dir), "adres")),
+        ]
 
-    nombres = ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas", "adres"]
-    errores = []
-    archivos = []
+        archivos = []
+        errores = []
 
-    for nombre, resultado in zip(nombres, resultados):
-        if isinstance(resultado, Exception):
-            errores.append({"entidad": nombre, "error": str(resultado)})
-        elif resultado and os.path.exists(resultado):
-            archivos.append(resultado)
+        for tarea in asyncio.as_completed(tareas):
+            nombre, resultado, error = await tarea
+            if error:
+                errores.append({"entidad": nombre, "error": error})
+                await _update_status(
+                    job_dir,
+                    resultado_entidad=(nombre, {"status": "error", "error": error}),
+                    errores=errores,
+                )
+            elif resultado and os.path.exists(resultado):
+                archivos.append(resultado)
+                await _update_status(
+                    job_dir,
+                    resultado_entidad=(nombre, {
+                        "status": "done",
+                        "archivo": os.path.basename(resultado),
+                    }),
+                )
 
+    # Empaquetar ZIP final
     zip_path = None
     if archivos:
         zip_name = f"certificados_{cedula}.zip"
@@ -58,14 +105,15 @@ async def run_job(job_id: str, job_dir: str, params: dict):
             for archivo in archivos:
                 zf.write(archivo, os.path.basename(archivo))
 
-    estado = {
-        "status": "done" if zip_path else "failed",
-        "zip": os.path.basename(zip_path) if zip_path else None,
-        "archivos": [os.path.basename(a) for a in archivos],
-        "errores": errores,
-    }
-    with open(os.path.join(job_dir, "status.json"), "w", encoding="utf-8") as f:
-        json.dump(estado, f, ensure_ascii=False)
+    overall = "done" if zip_path else "failed"
+    await _update_status(
+        job_dir,
+        overall_status=overall,
+        status=overall,  # backwards compat
+        zip=os.path.basename(zip_path) if zip_path else None,
+        archivos=[os.path.basename(a) for a in archivos],
+        errores=errores,
+    )
 
 
 async def cleanup_loop(jobs_dir: str):

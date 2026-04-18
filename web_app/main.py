@@ -55,8 +55,16 @@ async def submit(request: Request, body: SolicitudConsulta, background_tasks: Ba
     job_dir = os.path.join(JOBS_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
-    with open(os.path.join(job_dir, "status.json"), "w") as f:
-        json.dump({"status": "processing", "errores": []}, f)
+    estado_inicial = {
+        "overall_status": "procesando",
+        "status": "processing",  # backwards compat
+        "resultados": {e: {"status": "procesando"} for e in
+                       ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas", "adres"]},
+        "errores": [],
+        "zip": None,
+    }
+    with open(os.path.join(job_dir, "status.json"), "w", encoding="utf-8") as f:
+        json.dump(estado_inicial, f, ensure_ascii=False)
 
     background_tasks.add_task(run_job, job_id, job_dir, body.dict())
     return {"job_id": job_id, "status": "processing"}
@@ -69,7 +77,14 @@ async def status(job_id: str):
         raise HTTPException(404, "Job no encontrado")
     with open(ruta, encoding="utf-8") as f:
         data = json.load(f)
-    if data.get("status") == "done":
+
+    # URLs de descarga individual para entidades con status="done"
+    resultados = data.get("resultados", {})
+    for entidad, info in resultados.items():
+        if info.get("status") == "done" and info.get("archivo"):
+            info["download_url"] = f"/api/download/{job_id}/{entidad}"
+
+    if data.get("overall_status") == "done":
         data["download_url"] = f"/api/download/{job_id}"
     return data
 
@@ -87,6 +102,27 @@ async def download(job_id: str):
         media_type="application/zip",
         filename=zips[0],
     )
+
+
+@app.get("/api/download/{job_id}/{entidad}")
+async def download_entidad(job_id: str, entidad: str):
+    status_path = os.path.join(JOBS_DIR, job_id, "status.json")
+    if not os.path.exists(status_path):
+        raise HTTPException(404, "Job no encontrado")
+
+    with open(status_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    info = data.get("resultados", {}).get(entidad)
+    if not info or info.get("status") != "done" or not info.get("archivo"):
+        raise HTTPException(404, f"Certificado de '{entidad}' no disponible")
+
+    archivo_path = os.path.join(JOBS_DIR, job_id, info["archivo"])
+    if not os.path.exists(archivo_path):
+        raise HTTPException(404, "Archivo no existe en disco")
+
+    media_type = "application/pdf" if archivo_path.lower().endswith(".pdf") else "image/png"
+    return FileResponse(archivo_path, media_type=media_type, filename=info["archivo"])
 
 
 app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
