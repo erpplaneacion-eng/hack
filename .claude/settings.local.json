@@ -8,7 +8,12 @@
       "Bash(uvicorn main:app --host 0.0.0.0 --port 8000)",
       "Bash(echo \"PID: $!\")",
       "Bash(curl -s http://localhost:8000/)",
-      "Bash(pkill -f uvicorn)"
+      "Bash(pkill -f uvicorn)",
+      "mcp__playwright__browser_take_screenshot",
+      "mcp__playwright__browser_evaluate",
+      "mcp__playwright__browser_network_requests",
+      "mcp__playwright__browser_navigate",
+      "mcp__playwright__browser_snapshot"
     ]
   }
 }
