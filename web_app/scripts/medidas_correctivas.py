@@ -34,10 +34,11 @@ async def descargar(cedula: str, dia: str, mes: str, anio: str, output_dir: str)
             viewport={"width": 1280, "height": 900},
             user_agent=USER_AGENT,
         )
+        # Bloquear sólo media — imágenes y fuentes son necesarias para el PDF (logos)
         await context.route(
             "**/*",
             lambda route: route.abort()
-            if route.request.resource_type in ("image", "media", "font")
+            if route.request.resource_type == "media"
             else route.continue_(),
         )
         page = await context.new_page()

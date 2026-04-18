@@ -58,10 +58,11 @@ async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str
             viewport={"width": 1280, "height": 900},
             user_agent=USER_AGENT,
         )
+        # Bloquear sólo media — imágenes y fuentes son necesarias por si cae al fallback page.pdf()
         await context.route(
             "**/*",
             lambda route: route.abort()
-            if route.request.resource_type in ("image", "media", "font")
+            if route.request.resource_type == "media"
             else route.continue_(),
         )
         page = await context.new_page()
