@@ -11,9 +11,9 @@ Dos capas de código para el mismo propósito — descargar certificados de ante
 
 | Entidad | Módulo web_app | CAPTCHA | Reintentos |
 |---------|---------------|---------|------------|
-| Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA Enterprise (CapSolver) | No |
-| Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 Enterprise (CapSolver) | No |
-| Procuraduría General | `scripts/procuraduria.py` | Texto (resuelto localmente) | 3 intentos, espera progresiva |
+| Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA Enterprise (CapSolver, lanzado en paralelo al `goto`) | No |
+| Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 Enterprise (CapSolver, lanzado en paralelo al `goto`) | No |
+| Procuraduría General | `scripts/procuraduria.py` | Texto (resuelto localmente) | 2 intentos, espera 2s |
 | Policía — RNMC medidas correctivas | `scripts/medidas_correctivas.py` | Ninguno (requiere fecha de expedición) | No |
 | ADRES — afiliación EPS/BDUA | `scripts/adres.py` | reCAPTCHA (submit directo, sin validar token) | 3 intentos, espera progresiva |
 
@@ -63,19 +63,36 @@ docker run -p 8000:8000 -e CAPSOLVER_API_KEY=CAP-... hack-app
 
 ```
 web_app/
-├── main.py          # FastAPI: rutas /api/submit, /api/status/{id}, /api/download/{id}
-├── runner.py        # Orquesta las 5 descargas en paralelo (asyncio.gather + Semaphore(2))
+├── main.py          # FastAPI: /api/submit, /api/status/{id}, /api/download/{id}, /api/download/{id}/{entidad}
+├── runner.py        # Orquesta las 5 descargas con asyncio.as_completed + escritura incremental de status.json
 ├── scripts/         # Un módulo por entidad, cada uno expone descargar() async
-└── static/          # Frontend vanilla JS: formulario → polling cada 3s → descarga ZIP
+└── static/          # Frontend vanilla JS: formulario → polling cada 1.5s → estado granular + descarga individual o ZIP
 ```
 
 **Flujo de un job:**
-1. `POST /api/submit` → valida cédula/fecha/nombre, crea UUID, guarda `jobs/{uuid}/status.json`, lanza `run_job()` en background
-2. `run_job()` ejecuta los 5 `descargar()` en paralelo con timeout de 180s cada uno (Semaphore(2) limita jobs concurrentes)
-3. Archivos exitosos se empaquetan en `certificados_{cedula}.zip`
-4. `GET /api/status/{uuid}` devuelve el estado; cuando `"done"` incluye `download_url`
-5. `GET /api/download/{uuid}` sirve el ZIP
-6. Jobs se limpian automáticamente después de 2 horas (`cleanup_loop`)
+1. `POST /api/submit` → valida cédula/fecha/nombre, crea UUID, inicializa `jobs/{uuid}/status.json` con todas las entidades en `"procesando"`, lanza `run_job()` en background
+2. `run_job()` ejecuta los 5 `descargar()` en paralelo con timeout de 180s cada uno (Semaphore(2) limita jobs concurrentes). Usa `asyncio.as_completed` para escribir el estado de cada entidad apenas termina, no al final
+3. `_update_status()` con `asyncio.Lock` garantiza escrituras atómicas a `status.json`
+4. Archivos exitosos se empaquetan en `certificados_{cedula}.zip` cuando todas las entidades terminan
+5. `GET /api/status/{uuid}` devuelve estado con `overall_status`, `resultados[entidad].status` y `download_url` por entidad lista
+6. `GET /api/download/{uuid}` sirve el ZIP completo; `GET /api/download/{uuid}/{entidad}` sirve el PDF/PNG individual
+7. Jobs se limpian automáticamente después de 2 horas (`cleanup_loop`)
+
+**Estructura de `status.json`:**
+```json
+{
+  "overall_status": "procesando|done|failed",
+  "resultados": {
+    "antecedentes":        {"status": "procesando|done|error", "archivo": "...", "error": "..."},
+    "contraloria":         {...},
+    "procuraduria":        {...},
+    "medidas_correctivas": {...},
+    "adres":               {...}
+  },
+  "zip": "certificados_{cedula}.zip",
+  "errores": [{"entidad": "...", "error": "..."}]
+}
+```
 
 **Rate limiting:** `POST /api/submit` está limitado a 5 req/min por IP via `slowapi`.
 
@@ -104,15 +121,31 @@ Todas retornan la ruta absoluta del archivo generado o lanzan `RuntimeError`.
 
 ## Quirks importantes por entidad
 
-**Contraloría**: el formulario vive en un iframe de `cfiscal.contraloria.gov.co`. El módulo espera hasta 30s en loop para que el iframe aparezca antes de fallar.
+**Contraloría**: el formulario vive en un iframe de `cfiscal.contraloria.gov.co`. Se detecta con `wait_for_function` que escanea los iframes por src incluyendo `cfiscal` (timeout 20s, reemplazó al loop `sleep(3) × 10` original).
 
-**Procuraduría**: `resolver_captcha()` resuelve por regex 5 tipos de pregunta (matemáticas, dígitos de cédula, letras del nombre, capitales de departamento incluyendo "Colombia" → "Bogota"). Si llega una pregunta no reconocida lanza `ValueError`. Espera `#btnDescargar` para confirmar éxito antes de intentar descargar.
+**Procuraduría**: `resolver_captcha()` resuelve por regex 5 tipos de pregunta (matemáticas, dígitos de cédula, letras del nombre, capitales de departamento incluyendo "Colombia" → "Bogota"). Si llega una pregunta no reconocida lanza `ValueError`. Espera `#btnDescargar` (timeout 60s — server-side, no se puede acelerar) para confirmar éxito antes de intentar descargar.
 
-**RNMC (medidas correctivas)**: el sitio usa ASP.NET UpdatePanel. El botón "Consultar" aparece con id `btnConsultar2` al seleccionar Cédula (value=55). El click se hace con `__doPostBack('ctl00$ContentPlaceHolder3$btnConsultar2','')` directamente vía JS para evitar problemas con overlays y referencias stale del DOM.
+**RNMC (medidas correctivas)**: el sitio usa ASP.NET UpdatePanel. El botón "Consultar" aparece con id `btnConsultar2` al seleccionar Cédula (value=55). El click se hace con `__doPostBack('ctl00$ContentPlaceHolder3$btnConsultar2','')` directamente vía JS para evitar problemas con overlays y referencias stale del DOM. La sincronización del AJAX se hace con `wait_for_function` esperando que `.loader_decad` se oculte y `__doPostBack` esté definido.
 
 **ADRES**: el reCAPTCHA no se valida en servidor — se hace submit directo via `form.__EVENTTARGET`. La página de resultado debe contener "Resultados de la consulta" para considerarse válida. PDFs menores a 10 KB se descartan como inválidos.
 
 **headless vs headed**: todos los módulos de `web_app/scripts/` usan `headless=True`. Los scripts raíz usan `headless=False` para depuración visual. `page.pdf()` solo funciona en headless; en headed cae a `page.screenshot()`.
+
+## Optimizaciones de rendimiento
+
+Tiempo total bajó de ~90s a ~40s aplicando 3 patrones simultáneos:
+
+**1. Bloqueo selectivo de recursos** — `context.route()` aborta requests por `resource_type`. La regla difiere según cómo se obtiene el PDF:
+- Scripts que descargan el PDF directo del servidor (`procuraduria.py`, `adres.py`): bloquean `image`, `media`, `font` (no afecta el PDF descargado).
+- Scripts que generan el PDF con `page.pdf()` desde la página renderizada (`antecedentes.py`, `contraloria.py`, `medidas_correctivas.py`): bloquean **sólo `media`**, porque imágenes y fuentes son necesarias para que aparezcan logos y tipografía.
+
+**2. CapSolver lanzado en paralelo** — en `antecedentes.py` y `contraloria.py` la sitekey es constante. Se llama `asyncio.create_task(asyncio.to_thread(_resolver_captcha, ...))` ANTES del `browser.launch()` y se hace `await captcha_task` justo antes de inyectar el token. Convierte ~10s secuenciales en `max(navegación, captcha)`.
+
+**3. `wait_for_function` en lugar de `sleep` + polling** — todos los scripts reemplazan `wait_until="networkidle"` y bloques de `asyncio.sleep()` por:
+- `wait_until="domcontentloaded"` en los `goto`
+- `page.wait_for_function(...)` que termina apenas el DOM cambia (típicamente 50-200ms vs sleep fijo de 1-3s)
+
+**Streaming al frontend**: `runner.py` usa `asyncio.as_completed` y `_update_status()` con lock para escribir `status.json` cada vez que una entidad termina. El frontend hace polling cada 1.5s y muestra checkmarks/botones de descarga uno a uno, en lugar de un spinner ciego de 40s.
 
 ## Deploy Railway
 

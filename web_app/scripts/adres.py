@@ -61,19 +61,17 @@ async def _intentar_descarga(cedula: str, output_dir: str, tipo_doc: str = "CC")
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--disable-extensions",
-                "--disable-images",  # acelera carga
-                "--blink-settings=imagesEnabled=false",
             ],
         )
-        # Bloquear recursos pesados/innecesarios para acelerar la carga
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900},
             user_agent=USER_AGENT,
         )
+        # Bloquear sólo media — imágenes y fuentes son necesarias para el PDF
         await context.route(
             "**/*",
             lambda route: route.abort()
-            if route.request.resource_type in ("image", "media", "font")
+            if route.request.resource_type == "media"
             else route.continue_(),
         )
         page = await context.new_page()
@@ -99,11 +97,12 @@ async def _intentar_descarga(cedula: str, output_dir: str, tipo_doc: str = "CC")
                 }""")
             resultado_page = await nueva_pagina_info.value
 
-            # Bloquear recursos pesados también en la página de resultado
+            # En la página de resultado NO bloqueamos imágenes ni fuentes para que el PDF
+            # quede bien renderizado (logos, tipografía oficial). Sólo media.
             await resultado_page.route(
                 "**/*",
                 lambda route: route.abort()
-                if route.request.resource_type in ("image", "media", "font")
+                if route.request.resource_type == "media"
                 else route.continue_(),
             )
 
@@ -130,7 +129,12 @@ async def _intentar_descarga(cedula: str, output_dir: str, tipo_doc: str = "CC")
             if FRASE_EXITO.lower() not in contenido:
                 raise RuntimeError("ADRES: página sin frase de éxito tras espera")
 
-            # 6. PDF — re-habilitar imágenes para que el PDF las incluya si las hay
+            # 6. Esperar que terminen las imágenes/fuentes antes del PDF (evita layout roto)
+            try:
+                await resultado_page.wait_for_load_state("networkidle", timeout=10_000)
+            except PlaywrightTimeout:
+                pass
+
             ruta_pdf = os.path.join(output_dir, f"adres_{cedula}.pdf")
             return await _guardar_pdf(resultado_page, ruta_pdf)
 
