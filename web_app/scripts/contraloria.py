@@ -75,11 +75,17 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
             await page.goto(URL_FORMULARIO, wait_until="domcontentloaded", timeout=60_000)
             print(f"[contraloria:{cedula}] post-goto", flush=True)
 
-            # Buscar iframe cfiscal — un solo wait_for_selector + obtener frame
+            # Buscar iframe cfiscal — wait_for_selector detecta el <iframe> en DOM,
+            # pero Playwright puede tardar un instante en registrarlo en page.frames
             await page.wait_for_selector("iframe[src*='cfiscal']", timeout=45_000)
-            frame = next((f for f in page.frames if "cfiscal" in (f.url or "")), None)
+            frame = None
+            for _ in range(40):  # hasta 10s polling para que el Frame quede disponible
+                frame = next((f for f in page.frames if "cfiscal" in (f.url or "")), None)
+                if frame:
+                    break
+                await asyncio.sleep(0.25)
             if not frame:
-                raise RuntimeError("iframe cfiscal no encontrado tras 45s")
+                raise RuntimeError("iframe cfiscal: el Frame nunca se registró en page.frames")
             await frame.wait_for_selector("#ddlTipoDocumento", timeout=15_000)
             print(f"[contraloria:{cedula}] frame-encontrado", flush=True)
 
