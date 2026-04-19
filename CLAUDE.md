@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Dos capas de código para el mismo propósito — descargar certificados de antecedentes de 5 entidades gubernamentales colombianas:
 
-- **Scripts raíz** (`descargar_*.py`): borradores standalone con `headless=False`, útiles para depurar selectores y flujos. Son la referencia cuando algo falla en la app.
+- **`scripts/descargar_*.py`**: borradores standalone con `headless=False`, útiles para depurar selectores y flujos. Son la referencia cuando algo falla en la app.
 - **`web_app/`**: aplicación FastAPI de producción con interfaz web, headless=True, y deploy en Railway vía Docker.
 
 | Entidad | Módulo web_app | CAPTCHA | Reintentos |
 |---------|---------------|---------|------------|
-| Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA Enterprise (CapSolver, lanzado en paralelo al `goto`) | No |
-| Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 Enterprise (CapSolver, lanzado en paralelo al `goto`) | No |
+| Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | No (1 intento + validación reforzada) |
+| Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | No (1 intento + validación reforzada) |
 | Procuraduría General | `scripts/procuraduria.py` | Texto (resuelto localmente) | 2 intentos, espera 2s |
 | Policía — RNMC medidas correctivas | `scripts/medidas_correctivas.py` | Ninguno (requiere fecha de expedición) | No |
 | ADRES — afiliación EPS/BDUA | `scripts/adres.py` | reCAPTCHA (submit directo, sin validar token) | 3 intentos, espera progresiva |
@@ -82,6 +82,7 @@ web_app/
 ```json
 {
   "overall_status": "procesando|done|failed",
+  "status": "procesando|done|failed",
   "resultados": {
     "antecedentes":        {"status": "procesando|done|error", "archivo": "...", "error": "..."},
     "contraloria":         {...},
@@ -94,10 +95,12 @@ web_app/
 }
 ```
 
+`status` es alias de `overall_status` por retrocompatibilidad con clientes viejos — `main.py` y `runner.py` lo escriben en paralelo.
+
 **Rate limiting:** `POST /api/submit` está limitado a 5 req/min por IP via `slowapi`.
 
 **Variables de entorno (Railway):**
-- `CAPSOLVER_API_KEY` — requerida para Policía y Contraloría
+- `CAPSOLVER_API_KEY` — usada por Policía y Contraloría. `runner.py` tiene un fallback hardcoded; en producción debe inyectarse desde Railway.
 - `PORT` — inyectada automáticamente por Railway
 
 ## Firma de cada descargar()
@@ -129,6 +132,8 @@ Todas retornan la ruta absoluta del archivo generado o lanzan `RuntimeError`.
 
 **ADRES**: el reCAPTCHA no se valida en servidor — se hace submit directo via `form.__EVENTTARGET`. La página de resultado debe contener "Resultados de la consulta" para considerarse válida. PDFs menores a 10 KB se descartan como inválidos.
 
+**Antecedentes / Contraloría**: validan tamaño de PDF (≥ 10 KB) y presencia de errores en la página antes de aceptar el resultado, igual que ADRES y Procuraduría. Cada etapa imprime `[entidad:cedula] <etapa>` a stdout para diagnosticar fallas en logs de Railway.
+
 **headless vs headed**: todos los módulos de `web_app/scripts/` usan `headless=True`. Los scripts raíz usan `headless=False` para depuración visual. `page.pdf()` solo funciona en headless; en headed cae a `page.screenshot()`.
 
 ## Optimizaciones de rendimiento
@@ -149,4 +154,4 @@ Tiempo total bajó de ~90s a ~40s aplicando 3 patrones simultáneos:
 
 ## Deploy Railway
 
-El `railway.toml` apunta al Dockerfile en `web_app/Dockerfile`. Railway construye desde la raíz del repo, por eso el Dockerfile usa `COPY web_app/requirements.txt .` y `COPY web_app/ .`. La imagen base es `mcr.microsoft.com/playwright/python:v{VERSION}-jammy` — versión debe coincidir con `playwright>=` en `requirements.txt`.
+El `railway.toml` apunta al Dockerfile en `web_app/Dockerfile`. Railway construye desde la raíz del repo, por eso el Dockerfile usa `COPY web_app/requirements.txt .` y `COPY web_app/ .`. La imagen base es `mcr.microsoft.com/playwright/python:v1.58.0-jammy` y `requirements.txt` pide `playwright>=1.58.0`. Si actualizas una, actualiza la otra.

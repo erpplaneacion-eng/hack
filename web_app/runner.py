@@ -14,7 +14,7 @@ CAPSOLVER_API_KEY = os.getenv(
 )
 TIMEOUT_SEGUNDOS = 180
 
-_semaforo = asyncio.Semaphore(2)
+_semaforo = asyncio.Semaphore(3)
 _status_lock = asyncio.Lock()
 
 ENTIDADES = ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas", "adres"]

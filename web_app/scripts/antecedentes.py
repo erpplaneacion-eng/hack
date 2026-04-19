@@ -62,9 +62,14 @@ async def _inyectar_token(page, token: str):
 
 
 async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
-    # Lanzar CapSolver en paralelo con la carga de la página (la sitekey es constante)
+    print(f"[antecedentes:{cedula}] inicio", flush=True)
+
+    # CapSolver en paralelo con la carga; timeout explícito de 90s para no comerse el budget global
     captcha_task = asyncio.create_task(
-        asyncio.to_thread(_resolver_captcha, capsolver_api_key)
+        asyncio.wait_for(
+            asyncio.to_thread(_resolver_captcha, capsolver_api_key),
+            timeout=90,
+        )
     )
 
     async with async_playwright() as p:
@@ -95,6 +100,7 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
         try:
             # Timeout 60s para tolerar latencia entre Railway y servidor :7005 colombiano
             await page.goto(URL_INICIO, wait_until="domcontentloaded", timeout=60_000)
+            print(f"[antecedentes:{cedula}] post-goto", flush=True)
 
             # Aceptar términos y continuar
             await page.locator("#aceptaOption\\:0").click(timeout=20_000)
@@ -107,7 +113,11 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
             await campo.fill(cedula)
 
             # Esperar el token de CapSolver (probablemente ya está listo)
-            token = await captcha_task
+            try:
+                token = await captcha_task
+            except asyncio.TimeoutError:
+                raise RuntimeError("CapSolver timeout >90s")
+            print(f"[antecedentes:{cedula}] post-captcha-task", flush=True)
             await _inyectar_token(page, token)
 
             # Submit
@@ -123,18 +133,24 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
                 await page.evaluate("document.querySelector('form').submit()")
 
             await page.wait_for_load_state("domcontentloaded", timeout=40_000)
+            print(f"[antecedentes:{cedula}] post-submit", flush=True)
 
-            # Esperar que aparezca contenido del resultado (no un spinner ni la misma página)
-            try:
-                await page.wait_for_function(
-                    """() => {
-                        const t = document.body.innerText.toLowerCase();
-                        return t.includes('antecedentes') && t.length > 200;
-                    }""",
-                    timeout=30_000,
-                )
-            except PlaywrightTimeout:
-                pass  # seguir y generar PDF de lo que haya
+            # Validación post-submit no silenciosa: detectar éxito o error explícito
+            await page.wait_for_function(
+                """() => {
+                    const t = document.body.innerText.toLowerCase();
+                    const huboError = ['captcha', 'no es válido', 'intente nuevamente', 'error'].some(e => t.includes(e));
+                    const exito = t.includes('antecedentes') && t.length > 200;
+                    return exito || huboError;
+                }""",
+                timeout=30_000,
+            )
+            texto = (await page.inner_text("body")).lower()
+            if any(e in texto for e in ["captcha inválido", "captcha no es válido", "intente nuevamente"]):
+                raise RuntimeError("Antecedentes: servidor reportó captcha inválido")
+            if "antecedentes" not in texto:
+                raise RuntimeError("Antecedentes: página de resultado no apareció")
+            print(f"[antecedentes:{cedula}] post-validacion-resultado", flush=True)
 
             # Esperar que terminen recursos (logos, fuentes) antes del PDF
             try:
@@ -144,16 +160,32 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
 
             ruta_pdf = os.path.join(output_dir, f"antecedentes_{cedula}.pdf")
             ruta_png = os.path.join(output_dir, f"antecedentes_{cedula}.png")
+            print(f"[antecedentes:{cedula}] pre-PDF", flush=True)
 
             try:
                 await page.pdf(
                     path=ruta_pdf, format="A4", print_background=True,
                     margin={"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"},
                 )
+                tamano = os.path.getsize(ruta_pdf)
+                if tamano < 10_000:
+                    os.remove(ruta_pdf)
+                    raise RuntimeError(f"PDF de antecedentes sospechosamente pequeño ({tamano} bytes)")
+                print(f"[antecedentes:{cedula}] post-PDF ({tamano} bytes)", flush=True)
                 return ruta_pdf
+            except RuntimeError:
+                raise
             except Exception:
                 await page.screenshot(path=ruta_png, full_page=True)
+                tamano = os.path.getsize(ruta_png)
+                if tamano < 10_000:
+                    os.remove(ruta_png)
+                    raise RuntimeError(f"PNG de antecedentes sospechosamente pequeño ({tamano} bytes)")
+                print(f"[antecedentes:{cedula}] post-PNG ({tamano} bytes)", flush=True)
                 return ruta_png
+        except Exception as e:
+            print(f"[antecedentes:{cedula}] ERROR: {e}", flush=True)
+            raise
         finally:
             # Si el browser se cierra antes que el captcha, cancelar la tarea
             if not captcha_task.done():
@@ -162,16 +194,6 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
 
 
 async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
-    """Retorna ruta del archivo generado. Reintenta hasta 2 veces antes de lanzar."""
+    """Retorna ruta del archivo generado."""
     os.makedirs(output_dir, exist_ok=True)
-
-    ultimo_error: Exception = RuntimeError("Sin intentos realizados")
-    for intento in range(1, 3):
-        try:
-            return await _intentar_descarga(cedula, output_dir, capsolver_api_key)
-        except Exception as e:
-            ultimo_error = e
-            if intento < 2:
-                await asyncio.sleep(3)
-
-    raise RuntimeError(f"Antecedentes falló tras 2 intentos. Último error: {ultimo_error}")
+    return await _intentar_descarga(cedula, output_dir, capsolver_api_key)

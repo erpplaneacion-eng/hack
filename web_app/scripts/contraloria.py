@@ -35,9 +35,14 @@ def _resolver_captcha(api_key: str) -> str:
 
 
 async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
-    # CapSolver en paralelo desde el inicio
+    print(f"[contraloria:{cedula}] inicio", flush=True)
+
+    # CapSolver en paralelo desde el inicio; timeout 90s para no agotar el budget global
     captcha_task = asyncio.create_task(
-        asyncio.to_thread(_resolver_captcha, capsolver_api_key)
+        asyncio.wait_for(
+            asyncio.to_thread(_resolver_captcha, capsolver_api_key),
+            timeout=90,
+        )
     )
 
     async with async_playwright() as p:
@@ -66,38 +71,26 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
         await Stealth().apply_stealth_async(page)
 
         try:
-            # wait_until="load" — el iframe de cfiscal se inyecta por JS tras el load completo
-            await page.goto(URL_FORMULARIO, wait_until="load", timeout=60_000)
+            # domcontentloaded en lugar de "load" — los trackers .gov.co cuelgan el evento load
+            await page.goto(URL_FORMULARIO, wait_until="domcontentloaded", timeout=60_000)
+            print(f"[contraloria:{cedula}] post-goto", flush=True)
 
-            # Esperar a que el iframe de cfiscal aparezca — timeout extendido para producción
-            try:
-                await page.wait_for_function(
-                    """() => Array.from(document.querySelectorAll('iframe'))
-                        .some(f => f.src && f.src.includes('cfiscal'))""",
-                    timeout=45_000,
-                )
-            except PlaywrightTimeout:
-                raise RuntimeError("No apareció el iframe de Contraloría en 45s")
-
-            # Esperar que el frame realmente cargue su contenido
-            frame = None
-            for _ in range(30):
-                frame = next((f for f in page.frames if "cfiscal" in (f.url or "")), None)
-                if frame:
-                    try:
-                        await frame.wait_for_selector("#ddlTipoDocumento", timeout=2_000)
-                        break
-                    except PlaywrightTimeout:
-                        frame = None
-                await asyncio.sleep(0.5)
-
+            # Buscar iframe cfiscal — un solo wait_for_selector + obtener frame
+            await page.wait_for_selector("iframe[src*='cfiscal']", timeout=45_000)
+            frame = next((f for f in page.frames if "cfiscal" in (f.url or "")), None)
             if not frame:
-                raise RuntimeError("No se encontró el iframe de Contraloría")
+                raise RuntimeError("iframe cfiscal no encontrado tras 45s")
+            await frame.wait_for_selector("#ddlTipoDocumento", timeout=15_000)
+            print(f"[contraloria:{cedula}] frame-encontrado", flush=True)
 
             await frame.locator("#ddlTipoDocumento").select_option(label="Cédula de Ciudadanía")
             await frame.locator("#txtNumeroDocumento").fill(cedula)
 
-            token = await captcha_task
+            try:
+                token = await captcha_task
+            except asyncio.TimeoutError:
+                raise RuntimeError("CapSolver timeout >90s")
+            print(f"[contraloria:{cedula}] post-captcha", flush=True)
 
             await frame.evaluate("""
                 (token) => {
@@ -121,10 +114,25 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
                 nombre = descarga.suggested_filename or f"contraloria_{cedula}.pdf"
                 ruta_final = os.path.join(output_dir, nombre)
                 await descarga.save_as(ruta_final)
+                tamano = os.path.getsize(ruta_final)
+                if tamano < 10_000:
+                    os.remove(ruta_final)
+                    raise RuntimeError(f"Contraloría: archivo descargado sospechosamente pequeño ({tamano} bytes)")
+                print(f"[contraloria:{cedula}] descarga-directa ({tamano} bytes)", flush=True)
                 return ruta_final
 
             except PlaywrightTimeout:
                 # El servidor renderizó el certificado en la misma página — generar PDF
+                print(f"[contraloria:{cedula}] sin descarga directa, fallback a page.pdf", flush=True)
+
+                # Validar que no es una página de error antes de intentar PDF
+                try:
+                    contenido = (await frame.inner_text("body")).lower()
+                except Exception:
+                    contenido = ""
+                if any(e in contenido for e in ["captcha", "no es válido", "intente nuevamente"]):
+                    raise RuntimeError("Contraloría: frame devolvió error tras submit")
+
                 try:
                     await page.wait_for_load_state("networkidle", timeout=15_000)
                 except PlaywrightTimeout:
@@ -134,10 +142,25 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
                         path=ruta_pdf, format="A4", print_background=True,
                         margin={"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"},
                     )
+                    tamano = os.path.getsize(ruta_pdf)
+                    if tamano < 10_000:
+                        os.remove(ruta_pdf)
+                        raise RuntimeError(f"PDF de contraloría sospechosamente pequeño ({tamano} bytes)")
+                    print(f"[contraloria:{cedula}] post-PDF ({tamano} bytes)", flush=True)
                     return ruta_pdf
+                except RuntimeError:
+                    raise
                 except Exception:
                     await page.screenshot(path=ruta_png, full_page=True)
+                    tamano = os.path.getsize(ruta_png)
+                    if tamano < 10_000:
+                        os.remove(ruta_png)
+                        raise RuntimeError(f"PNG de contraloría sospechosamente pequeño ({tamano} bytes)")
+                    print(f"[contraloria:{cedula}] post-PNG ({tamano} bytes)", flush=True)
                     return ruta_png
+        except Exception as e:
+            print(f"[contraloria:{cedula}] ERROR: {e}", flush=True)
+            raise
         finally:
             if not captcha_task.done():
                 captcha_task.cancel()
@@ -145,16 +168,6 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
 
 
 async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
-    """Retorna ruta del archivo generado. Reintenta hasta 2 veces antes de lanzar."""
+    """Retorna ruta del archivo generado."""
     os.makedirs(output_dir, exist_ok=True)
-
-    ultimo_error: Exception = RuntimeError("Sin intentos realizados")
-    for intento in range(1, 3):
-        try:
-            return await _intentar_descarga(cedula, output_dir, capsolver_api_key)
-        except Exception as e:
-            ultimo_error = e
-            if intento < 2:
-                await asyncio.sleep(3)
-
-    raise RuntimeError(f"Contraloría falló tras 2 intentos. Último error: {ultimo_error}")
+    return await _intentar_descarga(cedula, output_dir, capsolver_api_key)
