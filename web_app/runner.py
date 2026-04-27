@@ -41,17 +41,18 @@ async def _update_status(job_dir: str, **cambios):
             json.dump(estado, f, ensure_ascii=False)
 
 
-async def run_job(job_id: str, job_dir: str, params: dict):
+async def run_job(job_id: str, job_dir: str, params: dict, entidades: list[str] | None = None):
     cedula = params["cedula"]
     partes = params["fecha_expedicion"].split("/")
     dia, mes, anio = partes[0], partes[1], partes[2]
     primer_nombre = params["primer_nombre"].upper().strip()
 
-    # Inicializar estado con todas las entidades en "procesando"
+    seleccion = entidades if entidades else ENTIDADES
+
     await _update_status(
         job_dir,
         overall_status="procesando",
-        resultados={e: {"status": "procesando"} for e in ENTIDADES},
+        resultados={e: {"status": "procesando"} for e in seleccion},
         errores=[],
         zip=None,
     )
@@ -65,14 +66,19 @@ async def run_job(job_id: str, job_dir: str, params: dict):
         except Exception as e:
             return nombre, None, str(e)
 
+    FABRICAS = {
+        "antecedentes":        lambda: antecedentes.descargar(cedula, job_dir, CAPSOLVER_API_KEY),
+        "contraloria":         lambda: contraloria.descargar(cedula, job_dir, CAPSOLVER_API_KEY),
+        "procuraduria":        lambda: procuraduria.descargar(cedula, primer_nombre, job_dir),
+        "medidas_correctivas": lambda: medidas_correctivas.descargar(cedula, dia, mes, anio, job_dir),
+        "adres":               lambda: adres.descargar(cedula, job_dir),
+        "ruaf":                lambda: ruaf.descargar(cedula, dia, mes, anio, job_dir, CAPSOLVER_API_KEY),
+    }
+
     async with _semaforo:
         tareas = [
-            asyncio.create_task(_run(antecedentes.descargar(cedula, job_dir, CAPSOLVER_API_KEY), "antecedentes")),
-            asyncio.create_task(_run(contraloria.descargar(cedula, job_dir, CAPSOLVER_API_KEY), "contraloria")),
-            asyncio.create_task(_run(procuraduria.descargar(cedula, primer_nombre, job_dir), "procuraduria")),
-            asyncio.create_task(_run(medidas_correctivas.descargar(cedula, dia, mes, anio, job_dir), "medidas_correctivas")),
-            asyncio.create_task(_run(adres.descargar(cedula, job_dir), "adres")),
-            asyncio.create_task(_run(ruaf.descargar(cedula, dia, mes, anio, job_dir, CAPSOLVER_API_KEY), "ruaf")),
+            asyncio.create_task(_run(FABRICAS[e](), e))
+            for e in seleccion if e in FABRICAS
         ]
 
         archivos = []

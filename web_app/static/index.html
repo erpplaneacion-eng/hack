@@ -365,6 +365,36 @@
     /* Estado de pantallas */
     .pantalla { display: none; }
     .pantalla.activa { display: block; }
+
+    /* Selector de entidades */
+    .entidades-selector { margin-bottom: 1.4rem; }
+    .entidades-selector .ctrl-todos {
+      font-size: 0.75rem; color: var(--azul);
+      cursor: pointer; text-decoration: underline;
+      display: block; margin-bottom: 0.5rem;
+      background: none; border: none; padding: 0; font-family: inherit;
+    }
+    .entidad-check {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.3rem 0; font-size: 0.82rem; cursor: pointer;
+      font-weight: normal; color: var(--texto);
+    }
+    .entidad-check input[type="checkbox"] {
+      accent-color: var(--azul); width: 15px; height: 15px;
+      cursor: pointer; flex-shrink: 0; margin-bottom: 0;
+    }
+
+    /* Mini-juego */
+    #juego-wrap {
+      margin: 1rem 0; display: none; flex-direction: column;
+      align-items: center; gap: 0.4rem;
+    }
+    #juego-canvas {
+      border: 2px solid var(--azul); border-radius: 8px;
+      background: #001a4d; display: block; max-width: 100%; touch-action: none;
+    }
+    #juego-score { font-size: 0.8rem; color: var(--azul); font-weight: 700; }
+    #juego-instruccion { font-size: 0.72rem; color: #888; text-align: center; }
   </style>
 </head>
 <body>
@@ -387,16 +417,18 @@
     <div id="pantalla-form" class="pantalla activa">
       <h2>Consultar antecedentes</h2>
       <p class="subtitulo">
-        Ingresa tus datos y el sistema consultará automáticamente las 5 entidades.
+        Selecciona las entidades que deseas consultar e ingresa tus datos.
         Cada certificado se podrá descargar apenas esté listo (25-60 segundos en total).
       </p>
 
-      <div class="entidades">
-        <span class="badge">Policía Nacional</span>
-        <span class="badge">Contraloría</span>
-        <span class="badge">Procuraduría</span>
-        <span class="badge">RNMC Medidas</span>
-        <span class="badge">ADRES — EPS</span>
+      <div class="entidades-selector">
+        <button type="button" class="ctrl-todos" id="btn-toggle-todos">Deseleccionar todas</button>
+        <label class="entidad-check"><input type="checkbox" class="cb-entidad" value="antecedentes" checked> Policía — Antecedentes judiciales</label>
+        <label class="entidad-check"><input type="checkbox" class="cb-entidad" value="contraloria" checked> Contraloría General</label>
+        <label class="entidad-check"><input type="checkbox" class="cb-entidad" value="procuraduria" checked> Procuraduría General</label>
+        <label class="entidad-check"><input type="checkbox" class="cb-entidad" value="medidas_correctivas" checked> Policía — Medidas Correctivas</label>
+        <label class="entidad-check"><input type="checkbox" class="cb-entidad" value="adres" checked> ADRES — Afiliación EPS (BDUA)</label>
+        <label class="entidad-check"><input type="checkbox" class="cb-entidad" value="ruaf" checked> RUAF — Registro Único de Afiliados</label>
       </div>
 
       <form id="consulta-form" novalidate>
@@ -427,6 +459,14 @@
           Cada certificado podrás descargarlo apenas esté listo.<br>
           El proceso completo tarda entre 25 y 60 segundos.
         </p>
+
+        <!-- Mini-juego mientras esperas -->
+        <div id="juego-wrap">
+          <div id="juego-score">Puntos: 0</div>
+          <canvas id="juego-canvas" width="380" height="200"></canvas>
+          <div id="juego-instruccion">Mueve el mouse (o toca) para atrapar los certificados 📄</div>
+        </div>
+
         <ul class="archivos-lista" id="archivos-lista"></ul>
 
         <a href="#" class="btn btn-descarga" id="btn-descarga" style="display:none">
@@ -449,6 +489,18 @@
 <script>
   let pollingInterval = null;
   let jobId = null;
+
+  // ── Selector de entidades ──────────────────────────────────────────────────
+  document.getElementById('btn-toggle-todos').addEventListener('click', function() {
+    const cbs = document.querySelectorAll('.cb-entidad');
+    const hayChecked = [...cbs].some(cb => cb.checked);
+    cbs.forEach(cb => cb.checked = !hayChecked);
+    this.textContent = hayChecked ? 'Seleccionar todas' : 'Deseleccionar todas';
+  });
+
+  function getEntidadesSeleccionadas() {
+    return [...document.querySelectorAll('.cb-entidad:checked')].map(cb => cb.value);
+  }
 
   // Formatear fecha automáticamente al escribir
   document.getElementById('fecha').addEventListener('input', function(e) {
@@ -491,6 +543,12 @@
 
     if (!valido) return;
 
+    const seleccionadas = getEntidadesSeleccionadas();
+    if (seleccionadas.length === 0) {
+      alert('Debes seleccionar al menos una entidad.');
+      return;
+    }
+
     document.getElementById('btn-consultar').disabled = true;
 
     try {
@@ -500,7 +558,8 @@
         body: JSON.stringify({
           cedula: cedula,
           fecha_expedicion: fecha,
-          primer_nombre: nombre
+          primer_nombre: nombre,
+          entidades: seleccionadas
         })
       });
 
@@ -522,6 +581,98 @@
     }
   });
 
+  // ── Mini-juego: Atrapa los certificados ───────────────────────────────────
+  const Juego = (() => {
+    const W = 380, H = 200;
+    const PAD_W = 70, PAD_H = 10, PAD_Y = H - 20;
+    const OBJ_H = 22;
+    const EMOJIS = ['📄', '📋', '🗂️', '📑'];
+
+    let canvas, ctx, scoreEl;
+    let animId = null, activo = false;
+    let padX = W / 2 - PAD_W / 2;
+    let objetos = [], puntos = 0, frame = 0;
+
+    function vel() { return 1.5 + Math.min(puntos * 0.04, 3); }
+
+    function spawn() {
+      objetos.push({
+        x: Math.random() * (W - 28),
+        y: -OBJ_H,
+        vy: vel() + Math.random() * 0.5,
+        e: EMOJIS[Math.floor(Math.random() * EMOJIS.length)]
+      });
+    }
+
+    function colisiona(o) {
+      return o.y + OBJ_H >= PAD_Y &&
+             o.y + OBJ_H <= PAD_Y + PAD_H + 6 &&
+             o.x + 24 >= padX && o.x <= padX + PAD_W;
+    }
+
+    function dibujar() {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#FCD116';
+      ctx.beginPath();
+      if (ctx.roundRect) {
+        ctx.roundRect(padX, PAD_Y, PAD_W, PAD_H, 4);
+      } else {
+        ctx.rect(padX, PAD_Y, PAD_W, PAD_H);
+      }
+      ctx.fill();
+      ctx.font = OBJ_H + 'px serif';
+      objetos.forEach(o => ctx.fillText(o.e, o.x, o.y + OBJ_H));
+      scoreEl.textContent = 'Puntos: ' + puntos;
+    }
+
+    function tick() {
+      if (!activo) return;
+      frame++;
+      const intervalo = Math.max(28, 65 - Math.floor(puntos / 4) * 5);
+      if (frame % intervalo === 0) spawn();
+      objetos = objetos.filter(o => {
+        o.y += o.vy;
+        if (colisiona(o)) { puntos++; return false; }
+        if (o.y > H) { puntos = Math.max(0, puntos - 1); return false; }
+        return true;
+      });
+      dibujar();
+      animId = requestAnimationFrame(tick);
+    }
+
+    function moverPad(clientX) {
+      const r = canvas.getBoundingClientRect();
+      padX = (clientX - r.left) * (W / r.width) - PAD_W / 2;
+      padX = Math.max(0, Math.min(W - PAD_W, padX));
+    }
+
+    const onMouse = e => moverPad(e.clientX);
+    const onTouch = e => { e.preventDefault(); moverPad(e.touches[0].clientX); };
+
+    return {
+      iniciar() {
+        canvas = document.getElementById('juego-canvas');
+        ctx = canvas.getContext('2d');
+        scoreEl = document.getElementById('juego-score');
+        padX = W / 2 - PAD_W / 2; objetos = []; puntos = 0; frame = 0;
+        activo = true;
+        canvas.addEventListener('mousemove', onMouse);
+        canvas.addEventListener('touchmove', onTouch, { passive: false });
+        document.getElementById('juego-wrap').style.display = 'flex';
+        tick();
+      },
+      detener() {
+        activo = false;
+        if (animId) { cancelAnimationFrame(animId); animId = null; }
+        if (canvas) {
+          canvas.removeEventListener('mousemove', onMouse);
+          canvas.removeEventListener('touchmove', onTouch);
+        }
+        document.getElementById('juego-wrap').style.display = 'none';
+      }
+    };
+  })();
+
   const ENTIDADES = {
     'antecedentes':        'Policía — Antecedentes judiciales',
     'contraloria':         'Contraloría General',
@@ -532,6 +683,7 @@
   };
 
   function iniciarPolling() {
+    Juego.iniciar();
     actualizarProgreso({resultados: {}});  // render inicial vacío
     pollingInterval = setInterval(async () => {
       try {
@@ -557,7 +709,12 @@
 
     archivosLista.innerHTML = '';
 
-    for (const [key, label] of Object.entries(ENTIDADES)) {
+    // Mantener el orden visual preferido, pero solo mostrar las entidades que vienen del API
+    const ordenPreferido = ['antecedentes', 'contraloria', 'procuraduria', 'medidas_correctivas', 'adres', 'ruaf'];
+    const activas = ordenPreferido.filter(k => k in resultados);
+
+    for (const key of activas) {
+      const label = ENTIDADES[key] || key;
       const info = resultados[key] || {status: 'procesando'};
       const li = document.createElement('li');
 
@@ -581,10 +738,11 @@
   }
 
   function finalizarUI(data) {
+    Juego.detener();
     document.getElementById('spinner-icono').style.display = 'none';
     document.getElementById('btn-reiniciar').style.display = 'block';
 
-    const total = Object.keys(ENTIDADES).length;
+    const total = Object.keys(data.resultados || {}).length;
     const ok = (data.archivos || []).length;
 
     if (data.overall_status === 'done') {
@@ -620,6 +778,7 @@
   }
 
   function reiniciar() {
+    Juego.detener();
     if (pollingInterval) clearInterval(pollingInterval);
     jobId = null;
     document.getElementById('consulta-form').reset();

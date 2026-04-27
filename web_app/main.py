@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -32,10 +32,25 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
+ENTIDADES_PERMITIDAS = frozenset([
+    "antecedentes", "contraloria", "procuraduria",
+    "medidas_correctivas", "adres", "ruaf",
+])
+
+
 class SolicitudConsulta(BaseModel):
     cedula: str
     fecha_expedicion: str  # DD/MM/YYYY
     primer_nombre: str
+    entidades: list[str] = []  # vacío = todas
+
+    @field_validator("entidades")
+    @classmethod
+    def validar_entidades(cls, v):
+        invalidas = set(v) - ENTIDADES_PERMITIDAS
+        if invalidas:
+            raise ValueError(f"Entidades no permitidas: {invalidas}")
+        return v
 
 
 @app.post("/api/submit")
@@ -55,18 +70,19 @@ async def submit(request: Request, body: SolicitudConsulta, background_tasks: Ba
     job_dir = os.path.join(JOBS_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
+    entidades_efectivas = body.entidades if body.entidades else list(ENTIDADES_PERMITIDAS)
+
     estado_inicial = {
         "overall_status": "procesando",
         "status": "processing",  # backwards compat
-        "resultados": {e: {"status": "procesando"} for e in
-                       ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas", "adres", "ruaf"]},
+        "resultados": {e: {"status": "procesando"} for e in entidades_efectivas},
         "errores": [],
         "zip": None,
     }
     with open(os.path.join(job_dir, "status.json"), "w", encoding="utf-8") as f:
         json.dump(estado_inicial, f, ensure_ascii=False)
 
-    background_tasks.add_task(run_job, job_id, job_dir, body.dict())
+    background_tasks.add_task(run_job, job_id, job_dir, body.dict(), entidades_efectivas)
     return {"job_id": job_id, "status": "processing"}
 
 
