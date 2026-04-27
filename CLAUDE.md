@@ -11,11 +11,12 @@ Dos capas de código para el mismo propósito — descargar certificados de ante
 
 | Entidad | Módulo web_app | CAPTCHA | Reintentos |
 |---------|---------------|---------|------------|
-| Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | No (1 intento + validación reforzada) |
-| Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | No (1 intento + validación reforzada) |
+| Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | 3 intentos, espera 3s |
+| Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | 3 intentos, espera 3s |
 | Procuraduría General | `scripts/procuraduria.py` | Texto (resuelto localmente) | 2 intentos, espera 2s |
 | Policía — RNMC medidas correctivas | `scripts/medidas_correctivas.py` | Ninguno (requiere fecha de expedición) | No |
 | ADRES — afiliación EPS/BDUA | `scripts/adres.py` | reCAPTCHA (submit directo, sin validar token) | 3 intentos, espera progresiva |
+| RUAF — Registro Único de Afiliados | `scripts/ruaf.py` | Imagen/OCR (CapSolver `ImageToTextTask`, hasta 4 intentos internos de captcha) | 3 intentos, espera 3s — **EN PRUEBAS, descarga no garantizada** |
 
 ## Comandos
 
@@ -64,7 +65,7 @@ docker run -p 8000:8000 -e CAPSOLVER_API_KEY=CAP-... hack-app
 ```
 web_app/
 ├── main.py          # FastAPI: /api/submit, /api/status/{id}, /api/download/{id}, /api/download/{id}/{entidad}
-├── runner.py        # Orquesta las 5 descargas con asyncio.as_completed + escritura incremental de status.json
+├── runner.py        # Orquesta las 6 descargas con asyncio.as_completed + escritura incremental de status.json
 ├── scripts/         # Un módulo por entidad, cada uno expone descargar() async
 └── static/          # Frontend vanilla JS: formulario → polling cada 1.5s → estado granular + descarga individual o ZIP
 ```
@@ -111,6 +112,7 @@ contraloria.descargar(cedula, output_dir, capsolver_api_key)  -> str   # PDF o P
 procuraduria.descargar(cedula, primer_nombre, output_dir)     -> str   # PDF (nombre sugerido por el servidor)
 medidas_correctivas.descargar(cedula, dia, mes, anio, output_dir) -> str  # PDF o PNG
 adres.descargar(cedula, output_dir, tipo_doc="CC")            -> str   # PDF
+ruaf.descargar(cedula, dia, mes, anio, output_dir, capsolver_api_key) -> str  # PDF o PNG — EN PRUEBAS
 ```
 
 Todas retornan la ruta absoluta del archivo generado o lanzan `RuntimeError`.
@@ -121,10 +123,13 @@ Todas retornan la ruta absoluta del archivo generado o lanzan `RuntimeError`.
 - `procuraduria_{cedula}.pdf` (nombre sugerido por descarga del servidor)
 - `medidas_correctivas_{cedula}.pdf` / `.png` (o nombre dado por servidor)
 - `adres_{cedula}.pdf`
+- `ruaf_{cedula}.pdf` / `.png` — EN PRUEBAS
 
 ## Quirks importantes por entidad
 
-**Contraloría**: el formulario vive en un iframe de `cfiscal.contraloria.gov.co`. Se detecta con `wait_for_function` que escanea los iframes por src incluyendo `cfiscal` (timeout 20s, reemplazó al loop `sleep(3) × 10` original).
+**Antecedentes / Contraloría (robustez)**: ambos módulos tienen 3 reintentos externos (`descargar()`) con `sleep(3)` entre ellos, igual al patrón de procuraduria/adres. Adicionalmente, `_resolver_captcha()` en ambos hace hasta 3 intentos por tipo de tarea de CapSolver antes de pasar al siguiente tipo. En `_inyectar_token()` de antecedentes se añadió la guarda `___grecaptcha_cfg.clients &&` antes de `Object.entries()` para evitar `TypeError` cuando el widget de reCAPTCHA aún no ha inicializado `.clients` al momento de la inyección (race condition entre CapSolver rápido y carga lenta del servidor colombiano).
+
+**Contraloría**: el formulario vive en un iframe de `cfiscal.contraloria.gov.co`. La detección del frame usa `page.frame_locator("iframe[src*='cfiscal']")` + `wait_for` del elemento interno `#ddlTipoDocumento`, lo que garantiza que el frame ya está registrado en `page.frames` cuando se intenta acceder (reemplazó al loop `sleep(0.25) × 40` que tenía una race condition).
 
 **Procuraduría**: `resolver_captcha()` resuelve por regex 5 tipos de pregunta (matemáticas, dígitos de cédula, letras del nombre, capitales de departamento incluyendo "Colombia" → "Bogota"). Si llega una pregunta no reconocida lanza `ValueError`. Espera `#btnDescargar` (timeout 60s — server-side, no se puede acelerar) para confirmar éxito antes de intentar descargar.
 
@@ -133,6 +138,8 @@ Todas retornan la ruta absoluta del archivo generado o lanzan `RuntimeError`.
 **ADRES**: el reCAPTCHA no se valida en servidor — se hace submit directo via `form.__EVENTTARGET`. La página de resultado debe contener "Resultados de la consulta" para considerarse válida. PDFs menores a 10 KB se descartan como inválidos.
 
 **Antecedentes / Contraloría**: validan tamaño de PDF (≥ 10 KB) y presencia de errores en la página antes de aceptar el resultado, igual que ADRES y Procuraduría. Cada etapa imprime `[entidad:cedula] <etapa>` a stdout para diagnosticar fallas en logs de Railway.
+
+**RUAF** (`ruaf.sispro.gov.co`): flujo en dos páginas — primero acepta términos en `TerminosCondiciones.aspx` (radio `input[type='radio']:first-of-type` + botón `input[value='Enviar']`), luego llena el formulario en `Filtro.aspx`. IDs exactos confirmados: dropdown `#ddlTiposDocumentos` (value `"5|CC"` para cédula), captcha input `#MainContent_txtCaptcha`, botón verificar `#MainContent_btnVerify` (texto "Verificar", NO "Validar"), botón consultar `#MainContent_btnConsultar`. La imagen del captcha se obtiene via `fetch` con `cache:'no-store'` desde JS para forzar imagen fresca del servidor en cada intento (evita que el browser cache la URL estática). El indicador de captcha correcto es `btnConsultar.is_enabled()` — si sigue deshabilitado (`aspNetDisabled`), el captcha fue rechazado. **Estado: EN PRUEBAS** — el OCR de CapSolver (`ImageToTextTask`) aún no resuelve el captcha con consistencia; pendiente ajuste de selector de imagen y validación del formato del captcha. Guarda `ruaf_captcha_{cedula}.png` en el directorio del job para diagnóstico.
 
 **headless vs headed**: todos los módulos de `web_app/scripts/` usan `headless=True`. Los scripts raíz usan `headless=False` para depuración visual. `page.pdf()` solo funciona en headless; en headed cae a `page.screenshot()`.
 
