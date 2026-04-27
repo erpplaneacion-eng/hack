@@ -6,7 +6,7 @@ import shutil
 import time
 import zipfile
 
-from scripts import antecedentes, contraloria, procuraduria, medidas_correctivas, adres
+from scripts import antecedentes, contraloria, procuraduria, medidas_correctivas, adres, ruaf
 
 CAPSOLVER_API_KEY = os.getenv(
     "CAPSOLVER_API_KEY",
@@ -17,7 +17,7 @@ TIMEOUT_SEGUNDOS = 180
 _semaforo = asyncio.Semaphore(3)
 _status_lock = asyncio.Lock()
 
-ENTIDADES = ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas", "adres"]
+ENTIDADES = ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas", "adres", "ruaf"]
 
 
 async def _update_status(job_dir: str, **cambios):
@@ -72,6 +72,7 @@ async def run_job(job_id: str, job_dir: str, params: dict):
             asyncio.create_task(_run(procuraduria.descargar(cedula, primer_nombre, job_dir), "procuraduria")),
             asyncio.create_task(_run(medidas_correctivas.descargar(cedula, dia, mes, anio, job_dir), "medidas_correctivas")),
             asyncio.create_task(_run(adres.descargar(cedula, job_dir), "adres")),
+            asyncio.create_task(_run(ruaf.descargar(cedula, dia, mes, anio, job_dir, CAPSOLVER_API_KEY), "ruaf")),
         ]
 
         archivos = []

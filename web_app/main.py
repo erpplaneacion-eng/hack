@@ -59,7 +59,7 @@ async def submit(request: Request, body: SolicitudConsulta, background_tasks: Ba
         "overall_status": "procesando",
         "status": "processing",  # backwards compat
         "resultados": {e: {"status": "procesando"} for e in
-                       ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas", "adres"]},
+                       ["antecedentes", "contraloria", "procuraduria", "medidas_correctivas", "adres", "ruaf"]},
         "errores": [],
         "zip": None,
     }
