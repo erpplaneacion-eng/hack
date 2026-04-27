@@ -26,16 +26,19 @@ def _resolver_captcha(api_key: str, page_url: str = URL_FORMULARIO) -> str:
         "ReCaptchaV2EnterpriseTaskProxyless",
         "ReCaptchaV2TaskProxyless",
     ]:
-        try:
-            payload = {"type": tipo, "websiteURL": page_url, "websiteKey": SITEKEY}
-            if tipo == "ReCaptchaV3TaskProxyless":
-                payload["pageAction"] = "verify"
-            solution = capsolver.solve(payload)
-            token = solution.get("gRecaptchaResponse", "")
-            if token:
-                return token
-        except Exception:
-            continue
+        payload = {"type": tipo, "websiteURL": page_url, "websiteKey": SITEKEY}
+        if tipo == "ReCaptchaV3TaskProxyless":
+            payload["pageAction"] = "verify"
+        for _intento in range(3):
+            try:
+                solution = capsolver.solve(payload)
+                token = solution.get("gRecaptchaResponse", "")
+                if token:
+                    return token
+                break  # token vacío → siguiente tipo
+            except Exception:
+                if _intento == 2:
+                    break  # agotó 3 intentos → siguiente tipo
     raise RuntimeError("CapSolver no devolvió token para Policía antecedentes")
 
 
@@ -51,7 +54,7 @@ async def _inyectar_token(page, token: str):
                 el.innerHTML = token;
                 el.value = token;
             });
-            if (typeof ___grecaptcha_cfg !== 'undefined') {
+            if (typeof ___grecaptcha_cfg !== 'undefined' && ___grecaptcha_cfg.clients) {
                 Object.entries(___grecaptcha_cfg.clients).forEach(([key, client]) => {
                     const callback = client?.U?.l?.callback || client?.aa?.l?.callback;
                     if (typeof callback === 'function') callback(token);
@@ -196,4 +199,13 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
 async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
     """Retorna ruta del archivo generado."""
     os.makedirs(output_dir, exist_ok=True)
-    return await _intentar_descarga(cedula, output_dir, capsolver_api_key)
+    ultimo_error: Exception = RuntimeError("Sin intentos realizados")
+    for intento in range(1, 4):  # 3 intentos
+        try:
+            return await _intentar_descarga(cedula, output_dir, capsolver_api_key)
+        except Exception as e:
+            ultimo_error = e
+            print(f"[antecedentes:{cedula}] intento {intento} falló: {e}", flush=True)
+            if intento < 3:
+                await asyncio.sleep(3)
+    raise RuntimeError(f"Antecedentes falló tras 3 intentos. Último error: {ultimo_error}")

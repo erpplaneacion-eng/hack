@@ -20,17 +20,20 @@ USER_AGENT = (
 def _resolver_captcha(api_key: str) -> str:
     capsolver.api_key = api_key
     for tipo in ["ReCaptchaV2TaskProxyless", "ReCaptchaV2EnterpriseTaskProxyless"]:
-        try:
-            solution = capsolver.solve({
-                "type": tipo,
-                "websiteURL": URL_CAPTCHA,
-                "websiteKey": SITEKEY,
-            })
-            token = solution.get("gRecaptchaResponse", "")
-            if token:
-                return token
-        except Exception:
-            continue
+        for _intento in range(3):
+            try:
+                solution = capsolver.solve({
+                    "type": tipo,
+                    "websiteURL": URL_CAPTCHA,
+                    "websiteKey": SITEKEY,
+                })
+                token = solution.get("gRecaptchaResponse", "")
+                if token:
+                    return token
+                break  # token vacío → siguiente tipo
+            except Exception:
+                if _intento == 2:
+                    break  # agotó 3 intentos → siguiente tipo
     raise RuntimeError("CapSolver no pudo resolver el captcha de Contraloría")
 
 
@@ -75,18 +78,14 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
             await page.goto(URL_FORMULARIO, wait_until="domcontentloaded", timeout=60_000)
             print(f"[contraloria:{cedula}] post-goto", flush=True)
 
-            # Buscar iframe cfiscal — wait_for_selector detecta el <iframe> en DOM,
-            # pero Playwright puede tardar un instante en registrarlo en page.frames
+            # Buscar iframe cfiscal: esperar el elemento interno directamente via FrameLocator
+            # garantiza que page.frames ya tiene el frame registrado cuando terminamos
             await page.wait_for_selector("iframe[src*='cfiscal']", timeout=45_000)
-            frame = None
-            for _ in range(40):  # hasta 10s polling para que el Frame quede disponible
-                frame = next((f for f in page.frames if "cfiscal" in (f.url or "")), None)
-                if frame:
-                    break
-                await asyncio.sleep(0.25)
+            frame_loc = page.frame_locator("iframe[src*='cfiscal']")
+            await frame_loc.locator("#ddlTipoDocumento").wait_for(timeout=15_000)
+            frame = next((f for f in page.frames if "cfiscal" in (f.url or "")), None)
             if not frame:
                 raise RuntimeError("iframe cfiscal: el Frame nunca se registró en page.frames")
-            await frame.wait_for_selector("#ddlTipoDocumento", timeout=15_000)
             print(f"[contraloria:{cedula}] frame-encontrado", flush=True)
 
             await frame.locator("#ddlTipoDocumento").select_option(label="Cédula de Ciudadanía")
@@ -176,4 +175,13 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
 async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
     """Retorna ruta del archivo generado."""
     os.makedirs(output_dir, exist_ok=True)
-    return await _intentar_descarga(cedula, output_dir, capsolver_api_key)
+    ultimo_error: Exception = RuntimeError("Sin intentos realizados")
+    for intento in range(1, 4):  # 3 intentos
+        try:
+            return await _intentar_descarga(cedula, output_dir, capsolver_api_key)
+        except Exception as e:
+            ultimo_error = e
+            print(f"[contraloria:{cedula}] intento {intento} falló: {e}", flush=True)
+            if intento < 3:
+                await asyncio.sleep(3)
+    raise RuntimeError(f"Contraloría falló tras 3 intentos. Último error: {ultimo_error}")
