@@ -13,7 +13,9 @@
       "mcp__playwright__browser_evaluate",
       "mcp__playwright__browser_network_requests",
       "mcp__playwright__browser_navigate",
-      "mcp__playwright__browser_snapshot"
+      "mcp__playwright__browser_snapshot",
+      "Bash(find \"C:\\\\\\\\Users\\\\\\\\diego\\\\\\\\OneDrive\\\\\\\\Desktop\\\\\\\\hack\\\\\\\\web_app\" -type f)",
+      "Skill(claude-md-management:revise-claude-md)"
     ]
   }
 }

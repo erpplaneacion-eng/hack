@@ -14,7 +14,7 @@ Dos capas de código para el mismo propósito — descargar certificados de ante
 | Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | 3 intentos, espera 3s |
 | Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | 3 intentos, espera 3s |
 | Procuraduría General | `scripts/procuraduria.py` | Texto (resuelto localmente) | 2 intentos, espera 2s |
-| Policía — RNMC medidas correctivas | `scripts/medidas_correctivas.py` | Ninguno (requiere fecha de expedición) | No |
+| Policía — RNMC medidas correctivas | `scripts/medidas_correctivas.py` | Ninguno (requiere fecha de expedición) | 2 intentos |
 | ADRES — afiliación EPS/BDUA | `scripts/adres.py` | reCAPTCHA (submit directo, sin validar token) | 3 intentos, espera progresiva |
 | RUAF — Registro Único de Afiliados | `scripts/ruaf.py` | Imagen/OCR (CapSolver `ImageToTextTask`, hasta 4 intentos internos de captcha) | 3 intentos, espera 3s — **EN PRUEBAS, descarga no garantizada** |
 
@@ -67,7 +67,7 @@ web_app/
 ├── main.py          # FastAPI: /api/submit, /api/status/{id}, /api/download/{id}, /api/download/{id}/{entidad}
 ├── runner.py        # Orquesta las 6 descargas con asyncio.as_completed + escritura incremental de status.json
 ├── scripts/         # Un módulo por entidad, cada uno expone descargar() async
-└── static/          # Frontend vanilla JS: formulario → polling cada 1.5s → estado granular + descarga individual o ZIP
+└── static/          # Frontend vanilla JS: formulario → polling cada 1.5s → estado granular + descarga individual o ZIP + mini-juego "Atrapa los certificados" mientras se espera
 ```
 
 **Flujo de un job:**
@@ -99,6 +99,8 @@ web_app/
 `status` es alias de `overall_status` por retrocompatibilidad con clientes viejos — `main.py` y `runner.py` lo escriben en paralelo.
 
 **Rate limiting:** `POST /api/submit` está limitado a 5 req/min por IP via `slowapi`.
+
+**Selector de entidades:** El frontend permite marcar/desmarcar entidades antes de enviar. El payload de `/api/submit` incluye `entidades: list[str]`; `main.py` filtra las tareas en `runner.py` según la lista recibida. RUAF viene marcado por defecto pero con label "en pruebas".
 
 **Variables de entorno (Railway):**
 - `CAPSOLVER_API_KEY` — usada por Policía y Contraloría. `runner.py` tiene un fallback hardcoded; en producción debe inyectarse desde Railway.
