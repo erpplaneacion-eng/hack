@@ -464,7 +464,7 @@
         <div id="juego-wrap">
           <div id="juego-score">Puntos: 0</div>
           <canvas id="juego-canvas" width="380" height="200"></canvas>
-          <div id="juego-instruccion">Mueve el mouse (o toca) para atrapar los certificados 📄</div>
+          <div id="juego-instruccion">Mueve la nave y dispara para derribar enemigos 🚀</div>
         </div>
 
         <ul class="archivos-lista" id="archivos-lista"></ul>
@@ -581,83 +581,184 @@
     }
   });
 
-  // ── Mini-juego: Atrapa los certificados ───────────────────────────────────
+  // ── Mini-juego: Naves ─────────────────────────────────────────────────────
   const Juego = (() => {
     const W = 380, H = 200;
-    const PAD_W = 70, PAD_H = 10, PAD_Y = H - 20;
-    const OBJ_H = 22;
-    const EMOJIS = ['📄', '📋', '🗂️', '📑'];
+    const SHIP_W = 30, SHIP_H = 14;
+    const ENEMY_W = 20, ENEMY_H = 14;
 
     let canvas, ctx, scoreEl;
     let animId = null, activo = false;
-    let padX = W / 2 - PAD_W / 2;
-    let objetos = [], puntos = 0, frame = 0;
+    let shipX = W / 2 - SHIP_W / 2;
+    let shipY = H - 24;
+    let bullets = [];
+    let enemies = [];
+    let stars = [];
+    let puntos = 0, frame = 0;
+    let shooting = false;
 
-    function vel() { return 1.5 + Math.min(puntos * 0.04, 3); }
+    function enemySpeed() { return 1.2 + Math.min(puntos * 0.03, 2.8); }
+    function bulletSpeed() { return 4.8; }
 
-    function spawn() {
-      objetos.push({
-        x: Math.random() * (W - 28),
-        y: -OBJ_H,
-        vy: vel() + Math.random() * 0.5,
-        e: EMOJIS[Math.floor(Math.random() * EMOJIS.length)]
+    function initStars() {
+      stars = Array.from({ length: 38 }, () => ({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        s: 0.5 + Math.random() * 1.8,
+        v: 0.3 + Math.random() * 0.8
+      }));
+    }
+
+    function spawnEnemy() {
+      enemies.push({
+        x: 8 + Math.random() * (W - ENEMY_W - 16),
+        y: -ENEMY_H,
+        vy: enemySpeed() + Math.random() * 0.8
       });
     }
 
-    function colisiona(o) {
-      return o.y + OBJ_H >= PAD_Y &&
-             o.y + OBJ_H <= PAD_Y + PAD_H + 6 &&
-             o.x + 24 >= padX && o.x <= padX + PAD_W;
+    function fire() {
+      bullets.push({
+        x: shipX + SHIP_W / 2 - 1.5,
+        y: shipY - 4,
+        vy: bulletSpeed()
+      });
+    }
+
+    function rectHit(ax, ay, aw, ah, bx, by, bw, bh) {
+      return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+    }
+
+    function drawShip() {
+      ctx.save();
+      ctx.translate(shipX, shipY);
+      ctx.fillStyle = '#7cf5ff';
+      ctx.beginPath();
+      ctx.moveTo(SHIP_W / 2, 0);
+      ctx.lineTo(SHIP_W, SHIP_H);
+      ctx.lineTo(0, SHIP_H);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = '#003087';
+      ctx.fillRect(SHIP_W / 2 - 2, SHIP_H / 2, 4, SHIP_H / 2);
+      ctx.restore();
+    }
+
+    function drawEnemy(e) {
+      ctx.save();
+      ctx.translate(e.x, e.y);
+      ctx.fillStyle = '#ff4f6d';
+      ctx.fillRect(0, 0, ENEMY_W, ENEMY_H);
+      ctx.fillStyle = '#ffd166';
+      ctx.fillRect(3, 3, 4, 4);
+      ctx.fillRect(ENEMY_W - 7, 3, 4, 4);
+      ctx.restore();
+    }
+
+    function drawBullet(b) {
+      ctx.fillStyle = '#FCD116';
+      ctx.fillRect(b.x, b.y, 3, 8);
     }
 
     function dibujar() {
-      ctx.clearRect(0, 0, W, H);
-      ctx.fillStyle = '#FCD116';
-      ctx.beginPath();
-      if (ctx.roundRect) {
-        ctx.roundRect(padX, PAD_Y, PAD_W, PAD_H, 4);
-      } else {
-        ctx.rect(padX, PAD_Y, PAD_W, PAD_H);
-      }
-      ctx.fill();
-      ctx.font = OBJ_H + 'px serif';
-      objetos.forEach(o => ctx.fillText(o.e, o.x, o.y + OBJ_H));
+      ctx.fillStyle = '#001a4d';
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      stars.forEach(s => {
+        ctx.fillRect(s.x, s.y, s.s, s.s);
+      });
+
+      enemies.forEach(drawEnemy);
+      bullets.forEach(drawBullet);
+      drawShip();
       scoreEl.textContent = 'Puntos: ' + puntos;
     }
 
     function tick() {
       if (!activo) return;
       frame++;
-      const intervalo = Math.max(28, 65 - Math.floor(puntos / 4) * 5);
-      if (frame % intervalo === 0) spawn();
-      objetos = objetos.filter(o => {
-        o.y += o.vy;
-        if (colisiona(o)) { puntos++; return false; }
-        if (o.y > H) { puntos = Math.max(0, puntos - 1); return false; }
+
+      if (shooting && frame % 8 === 0) fire();
+      const intervaloEnemy = Math.max(22, 56 - Math.floor(puntos / 5) * 4);
+      if (frame % intervaloEnemy === 0) spawnEnemy();
+
+      stars.forEach(s => {
+        s.y += s.v;
+        if (s.y > H) {
+          s.y = -2;
+          s.x = Math.random() * W;
+        }
+      });
+
+      bullets = bullets.filter(b => {
+        b.y -= b.vy;
+        return b.y > -10;
+      });
+
+      enemies = enemies.filter(e => {
+        e.y += e.vy;
+        if (e.y > H + 8) {
+          puntos = Math.max(0, puntos - 1);
+          return false;
+        }
+
+        if (rectHit(shipX, shipY, SHIP_W, SHIP_H, e.x, e.y, ENEMY_W, ENEMY_H)) {
+          puntos = Math.max(0, puntos - 3);
+          return false;
+        }
+
         return true;
       });
+
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        for (let j = bullets.length - 1; j >= 0; j--) {
+          if (rectHit(enemies[i].x, enemies[i].y, ENEMY_W, ENEMY_H, bullets[j].x, bullets[j].y, 3, 8)) {
+            enemies.splice(i, 1);
+            bullets.splice(j, 1);
+            puntos++;
+            break;
+          }
+        }
+      }
+
       dibujar();
       animId = requestAnimationFrame(tick);
     }
 
-    function moverPad(clientX) {
+    function moverNave(clientX) {
       const r = canvas.getBoundingClientRect();
-      padX = (clientX - r.left) * (W / r.width) - PAD_W / 2;
-      padX = Math.max(0, Math.min(W - PAD_W, padX));
+      shipX = (clientX - r.left) * (W / r.width) - SHIP_W / 2;
+      shipX = Math.max(0, Math.min(W - SHIP_W, shipX));
     }
 
-    const onMouse = e => moverPad(e.clientX);
-    const onTouch = e => { e.preventDefault(); moverPad(e.touches[0].clientX); };
+    const onMouse = e => moverNave(e.clientX);
+    const onTouch = e => { e.preventDefault(); moverNave(e.touches[0].clientX); };
+    const onDown = () => { shooting = true; };
+    const onUp = () => { shooting = false; };
 
     return {
       iniciar() {
         canvas = document.getElementById('juego-canvas');
         ctx = canvas.getContext('2d');
         scoreEl = document.getElementById('juego-score');
-        padX = W / 2 - PAD_W / 2; objetos = []; puntos = 0; frame = 0;
+        shipX = W / 2 - SHIP_W / 2;
+        shipY = H - 24;
+        bullets = [];
+        enemies = [];
+        puntos = 0;
+        frame = 0;
+        shooting = false;
+        initStars();
         activo = true;
         canvas.addEventListener('mousemove', onMouse);
         canvas.addEventListener('touchmove', onTouch, { passive: false });
+        canvas.addEventListener('mousedown', onDown);
+        canvas.addEventListener('mouseup', onUp);
+        canvas.addEventListener('mouseleave', onUp);
+        canvas.addEventListener('touchstart', onDown, { passive: true });
+        canvas.addEventListener('touchend', onUp, { passive: true });
         document.getElementById('juego-wrap').style.display = 'flex';
         tick();
       },
@@ -667,6 +768,11 @@
         if (canvas) {
           canvas.removeEventListener('mousemove', onMouse);
           canvas.removeEventListener('touchmove', onTouch);
+          canvas.removeEventListener('mousedown', onDown);
+          canvas.removeEventListener('mouseup', onUp);
+          canvas.removeEventListener('mouseleave', onUp);
+          canvas.removeEventListener('touchstart', onDown);
+          canvas.removeEventListener('touchend', onUp);
         }
         document.getElementById('juego-wrap').style.display = 'none';
       }
