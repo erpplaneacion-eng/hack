@@ -22,8 +22,8 @@ def _resolver_captcha(api_key: str, page_url: str = URL_FORMULARIO) -> str:
     """Llama a CapSolver — síncrono, se ejecuta en thread."""
     capsolver.api_key = api_key
     for tipo in [
-        "ReCaptchaV3TaskProxyless",
         "ReCaptchaV2EnterpriseTaskProxyless",
+        "ReCaptchaV3TaskProxyless",
         "ReCaptchaV2TaskProxyless",
     ]:
         payload = {"type": tipo, "websiteURL": page_url, "websiteKey": SITEKEY}
@@ -55,10 +55,12 @@ async def _inyectar_token(page, token: str):
                 el.value = token;
             });
             if (typeof ___grecaptcha_cfg !== 'undefined' && ___grecaptcha_cfg.clients) {
-                Object.entries(___grecaptcha_cfg.clients).forEach(([key, client]) => {
-                    const callback = client?.U?.l?.callback || client?.aa?.l?.callback;
-                    if (typeof callback === 'function') callback(token);
-                });
+                const findCallbacks = (obj, depth) => {
+                    if (depth > 6 || !obj || typeof obj !== 'object') return;
+                    if (typeof obj.callback === 'function') { obj.callback(token); return; }
+                    Object.values(obj).forEach(v => findCallbacks(v, depth + 1));
+                };
+                Object.values(___grecaptcha_cfg.clients).forEach(c => findCallbacks(c, 0));
             }
         }
     """, token)
@@ -121,6 +123,14 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
             except asyncio.TimeoutError:
                 raise RuntimeError("CapSolver timeout >90s")
             print(f"[antecedentes:{cedula}] post-captcha-task", flush=True)
+            # Esperar que el widget reCAPTCHA haya registrado sus callbacks antes de inyectar
+            try:
+                await page.wait_for_function(
+                    "() => typeof ___grecaptcha_cfg !== 'undefined' && ___grecaptcha_cfg.clients && Object.keys(___grecaptcha_cfg.clients).length > 0",
+                    timeout=15_000,
+                )
+            except PlaywrightTimeout:
+                pass  # si no aparece, intentar inyectar de todas formas
             await _inyectar_token(page, token)
 
             # Submit
@@ -188,6 +198,12 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
                 return ruta_png
         except Exception as e:
             print(f"[antecedentes:{cedula}] ERROR: {e}", flush=True)
+            try:
+                debug_path = os.path.join(output_dir, f"antecedentes_{cedula}_error_debug.png")
+                await page.screenshot(path=debug_path, full_page=True)
+                print(f"[antecedentes:{cedula}] screenshot de error: {debug_path}", flush=True)
+            except Exception:
+                pass
             raise
         finally:
             # Si el browser se cierra antes que el captcha, cancelar la tarea
@@ -207,5 +223,11 @@ async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str
             ultimo_error = e
             print(f"[antecedentes:{cedula}] intento {intento} falló: {e}", flush=True)
             if intento < 3:
-                await asyncio.sleep(3)
+                msg = str(e).lower()
+                if "captcha inválido" in msg or "captcha no es válido" in msg:
+                    await asyncio.sleep(8)
+                elif "timeout" in msg:
+                    await asyncio.sleep(10)
+                else:
+                    await asyncio.sleep(3)
     raise RuntimeError(f"Antecedentes falló tras 3 intentos. Último error: {ultimo_error}")

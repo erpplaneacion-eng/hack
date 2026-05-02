@@ -19,14 +19,13 @@ USER_AGENT = (
 
 def _resolver_captcha(api_key: str) -> str:
     capsolver.api_key = api_key
-    for tipo in ["ReCaptchaV2TaskProxyless", "ReCaptchaV2EnterpriseTaskProxyless"]:
+    for tipo in ["ReCaptchaV2EnterpriseTaskProxyless", "ReCaptchaV3TaskProxyless", "ReCaptchaV2TaskProxyless"]:
         for _intento in range(3):
             try:
-                solution = capsolver.solve({
-                    "type": tipo,
-                    "websiteURL": URL_CAPTCHA,
-                    "websiteKey": SITEKEY,
-                })
+                payload = {"type": tipo, "websiteURL": URL_CAPTCHA, "websiteKey": SITEKEY}
+                if tipo == "ReCaptchaV3TaskProxyless":
+                    payload["pageAction"] = "submit"
+                solution = capsolver.solve(payload)
                 token = solution.get("gRecaptchaResponse", "")
                 if token:
                     return token
@@ -113,7 +112,7 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
             ruta_png = os.path.join(output_dir, f"contraloria_{cedula}.png")
 
             try:
-                async with page.expect_download(timeout=30_000) as dl_info:
+                async with page.expect_download(timeout=60_000) as dl_info:
                     await frame.locator("#btnBuscar").click()
                 descarga = await dl_info.value
                 nombre = descarga.suggested_filename or f"contraloria_{cedula}.pdf"
@@ -165,6 +164,12 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
                     return ruta_png
         except Exception as e:
             print(f"[contraloria:{cedula}] ERROR: {e}", flush=True)
+            try:
+                debug_path = os.path.join(output_dir, f"contraloria_{cedula}_error_debug.png")
+                await page.screenshot(path=debug_path, full_page=True)
+                print(f"[contraloria:{cedula}] screenshot de error: {debug_path}", flush=True)
+            except Exception:
+                pass
             raise
         finally:
             if not captcha_task.done():
@@ -183,5 +188,11 @@ async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str
             ultimo_error = e
             print(f"[contraloria:{cedula}] intento {intento} falló: {e}", flush=True)
             if intento < 3:
-                await asyncio.sleep(3)
+                msg = str(e).lower()
+                if "captcha inválido" in msg or "captcha no es válido" in msg:
+                    await asyncio.sleep(8)
+                elif "timeout" in msg:
+                    await asyncio.sleep(10)
+                else:
+                    await asyncio.sleep(3)
     raise RuntimeError(f"Contraloría falló tras 3 intentos. Último error: {ultimo_error}")
