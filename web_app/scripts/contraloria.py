@@ -6,8 +6,7 @@ import capsolver
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import Stealth
 
-URL_FORMULARIO = "https://www.contraloria.gov.co/web/guest/persona-natural"
-URL_CAPTCHA    = "https://cfiscal.contraloria.gov.co/Certificados/CertificadoPersonaNatural.aspx"
+URL_CAPTCHA = "https://cfiscal.contraloria.gov.co/Certificados/CertificadoPersonaNatural.aspx"
 SITEKEY        = "6LcfnjwUAAAAAIyl8ehhox7ZYqLQSVl_w1dmYIle"
 
 USER_AGENT = (
@@ -73,22 +72,15 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
         await Stealth().apply_stealth_async(page)
 
         try:
-            # domcontentloaded en lugar de "load" — los trackers .gov.co cuelgan el evento load
-            await page.goto(URL_FORMULARIO, wait_until="domcontentloaded", timeout=40_000)
+            # Navegar directo al formulario en cfiscal — evita wrapper + detección de iframe
+            await page.goto(URL_CAPTCHA, wait_until="domcontentloaded", timeout=40_000)
             print(f"[contraloria:{cedula}] post-goto", flush=True)
 
-            # Buscar iframe cfiscal: esperar el elemento interno directamente via FrameLocator
-            # garantiza que page.frames ya tiene el frame registrado cuando terminamos
-            await page.wait_for_selector("iframe[src*='cfiscal']", timeout=20_000)
-            frame_loc = page.frame_locator("iframe[src*='cfiscal']")
-            await frame_loc.locator("#ddlTipoDocumento").wait_for(timeout=20_000)
-            frame = next((f for f in page.frames if "cfiscal" in (f.url or "")), None)
-            if not frame:
-                raise RuntimeError("iframe cfiscal: el Frame nunca se registró en page.frames")
-            print(f"[contraloria:{cedula}] frame-encontrado", flush=True)
+            await page.locator("#ddlTipoDocumento").wait_for(timeout=20_000)
+            print(f"[contraloria:{cedula}] formulario-listo", flush=True)
 
-            await frame.locator("#ddlTipoDocumento").select_option(label="Cédula de Ciudadanía")
-            await frame.locator("#txtNumeroDocumento").fill(cedula)
+            await page.locator("#ddlTipoDocumento").select_option(label="Cédula de Ciudadanía")
+            await page.locator("#txtNumeroDocumento").fill(cedula)
 
             try:
                 token = await captcha_task
@@ -96,7 +88,7 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
                 raise RuntimeError("CapSolver timeout >60s")
             print(f"[contraloria:{cedula}] post-captcha", flush=True)
 
-            await frame.evaluate("""
+            await page.evaluate("""
                 (token) => {
                     const ta = document.querySelector('textarea[name="g-recaptcha-response"]');
                     if (ta) { ta.value = token; ta.innerHTML = token; }
@@ -113,7 +105,7 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
 
             try:
                 async with page.expect_download(timeout=45_000) as dl_info:
-                    await frame.locator("#btnBuscar").click()
+                    await page.locator("#btnBuscar").click()
                 descarga = await dl_info.value
                 nombre = descarga.suggested_filename or f"contraloria_{cedula}.pdf"
                 ruta_final = os.path.join(output_dir, nombre)
@@ -131,11 +123,11 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
 
                 # Validar que no es una página de error antes de intentar PDF
                 try:
-                    contenido = (await frame.inner_text("body")).lower()
+                    contenido = (await page.inner_text("body")).lower()
                 except Exception:
                     contenido = ""
                 if any(e in contenido for e in ["captcha", "no es válido", "intente nuevamente"]):
-                    raise RuntimeError("Contraloría: frame devolvió error tras submit")
+                    raise RuntimeError("Contraloría: página devolvió error tras submit")
 
                 try:
                     await page.wait_for_load_state("networkidle", timeout=10_000)
