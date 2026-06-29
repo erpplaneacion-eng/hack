@@ -6,8 +6,7 @@ import capsolver
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import Stealth
 
-URL_FORMULARIO = "https://www.contraloria.gov.co/web/guest/persona-natural"
-URL_CAPTCHA    = "https://cfiscal.contraloria.gov.co/Certificados/CertificadoPersonaNatural.aspx"
+URL_CAPTCHA = "https://cfiscal.contraloria.gov.co/Certificados/CertificadoPersonaNatural.aspx"
 SITEKEY        = "6LcfnjwUAAAAAIyl8ehhox7ZYqLQSVl_w1dmYIle"
 
 USER_AGENT = (
@@ -19,14 +18,13 @@ USER_AGENT = (
 
 def _resolver_captcha(api_key: str) -> str:
     capsolver.api_key = api_key
-    for tipo in ["ReCaptchaV2TaskProxyless", "ReCaptchaV2EnterpriseTaskProxyless"]:
+    for tipo in ["ReCaptchaV2EnterpriseTaskProxyless", "ReCaptchaV3TaskProxyless", "ReCaptchaV2TaskProxyless"]:
         for _intento in range(3):
             try:
-                solution = capsolver.solve({
-                    "type": tipo,
-                    "websiteURL": URL_CAPTCHA,
-                    "websiteKey": SITEKEY,
-                })
+                payload = {"type": tipo, "websiteURL": URL_CAPTCHA, "websiteKey": SITEKEY}
+                if tipo == "ReCaptchaV3TaskProxyless":
+                    payload["pageAction"] = "submit"
+                solution = capsolver.solve(payload)
                 token = solution.get("gRecaptchaResponse", "")
                 if token:
                     return token
@@ -40,11 +38,11 @@ def _resolver_captcha(api_key: str) -> str:
 async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
     print(f"[contraloria:{cedula}] inicio", flush=True)
 
-    # CapSolver en paralelo desde el inicio; timeout 90s para no agotar el budget global
+    # CapSolver en paralelo desde el inicio; timeout 60s — CapSolver rara vez tarda más
     captcha_task = asyncio.create_task(
         asyncio.wait_for(
             asyncio.to_thread(_resolver_captcha, capsolver_api_key),
-            timeout=90,
+            timeout=60,
         )
     )
 
@@ -74,30 +72,23 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
         await Stealth().apply_stealth_async(page)
 
         try:
-            # domcontentloaded en lugar de "load" — los trackers .gov.co cuelgan el evento load
-            await page.goto(URL_FORMULARIO, wait_until="domcontentloaded", timeout=60_000)
+            # Navegar directo al formulario en cfiscal — evita wrapper + detección de iframe
+            await page.goto(URL_CAPTCHA, wait_until="domcontentloaded", timeout=40_000)
             print(f"[contraloria:{cedula}] post-goto", flush=True)
 
-            # Buscar iframe cfiscal: esperar el elemento interno directamente via FrameLocator
-            # garantiza que page.frames ya tiene el frame registrado cuando terminamos
-            await page.wait_for_selector("iframe[src*='cfiscal']", timeout=45_000)
-            frame_loc = page.frame_locator("iframe[src*='cfiscal']")
-            await frame_loc.locator("#ddlTipoDocumento").wait_for(timeout=15_000)
-            frame = next((f for f in page.frames if "cfiscal" in (f.url or "")), None)
-            if not frame:
-                raise RuntimeError("iframe cfiscal: el Frame nunca se registró en page.frames")
-            print(f"[contraloria:{cedula}] frame-encontrado", flush=True)
+            await page.locator("#ddlTipoDocumento").wait_for(timeout=20_000)
+            print(f"[contraloria:{cedula}] formulario-listo", flush=True)
 
-            await frame.locator("#ddlTipoDocumento").select_option(label="Cédula de Ciudadanía")
-            await frame.locator("#txtNumeroDocumento").fill(cedula)
+            await page.locator("#ddlTipoDocumento").select_option(label="Cédula de Ciudadanía")
+            await page.locator("#txtNumeroDocumento").fill(cedula)
 
             try:
                 token = await captcha_task
             except asyncio.TimeoutError:
-                raise RuntimeError("CapSolver timeout >90s")
+                raise RuntimeError("CapSolver timeout >60s")
             print(f"[contraloria:{cedula}] post-captcha", flush=True)
 
-            await frame.evaluate("""
+            await page.evaluate("""
                 (token) => {
                     const ta = document.querySelector('textarea[name="g-recaptcha-response"]');
                     if (ta) { ta.value = token; ta.innerHTML = token; }
@@ -113,8 +104,8 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
             ruta_png = os.path.join(output_dir, f"contraloria_{cedula}.png")
 
             try:
-                async with page.expect_download(timeout=30_000) as dl_info:
-                    await frame.locator("#btnBuscar").click()
+                async with page.expect_download(timeout=45_000) as dl_info:
+                    await page.locator("#btnBuscar").click()
                 descarga = await dl_info.value
                 nombre = descarga.suggested_filename or f"contraloria_{cedula}.pdf"
                 ruta_final = os.path.join(output_dir, nombre)
@@ -132,14 +123,14 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
 
                 # Validar que no es una página de error antes de intentar PDF
                 try:
-                    contenido = (await frame.inner_text("body")).lower()
+                    contenido = (await page.inner_text("body")).lower()
                 except Exception:
                     contenido = ""
                 if any(e in contenido for e in ["captcha", "no es válido", "intente nuevamente"]):
-                    raise RuntimeError("Contraloría: frame devolvió error tras submit")
+                    raise RuntimeError("Contraloría: página devolvió error tras submit")
 
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=15_000)
+                    await page.wait_for_load_state("networkidle", timeout=10_000)
                 except PlaywrightTimeout:
                     pass
                 try:
@@ -165,6 +156,12 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
                     return ruta_png
         except Exception as e:
             print(f"[contraloria:{cedula}] ERROR: {e}", flush=True)
+            try:
+                debug_path = os.path.join(output_dir, f"contraloria_{cedula}_error_debug.png")
+                await page.screenshot(path=debug_path, full_page=True)
+                print(f"[contraloria:{cedula}] screenshot de error: {debug_path}", flush=True)
+            except Exception:
+                pass
             raise
         finally:
             if not captcha_task.done():
@@ -183,5 +180,11 @@ async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str
             ultimo_error = e
             print(f"[contraloria:{cedula}] intento {intento} falló: {e}", flush=True)
             if intento < 3:
-                await asyncio.sleep(3)
+                msg = str(e).lower()
+                if "captcha inválido" in msg or "captcha no es válido" in msg:
+                    await asyncio.sleep(5)
+                elif "timeout" in msg:
+                    await asyncio.sleep(5)
+                else:
+                    await asyncio.sleep(2)
     raise RuntimeError(f"Contraloría falló tras 3 intentos. Último error: {ultimo_error}")

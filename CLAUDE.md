@@ -14,7 +14,7 @@ Dos capas de código para el mismo propósito — descargar certificados de ante
 | Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | 3 intentos, espera 3s |
 | Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | 3 intentos, espera 3s |
 | Procuraduría General | `scripts/procuraduria.py` | Texto (resuelto localmente) | 2 intentos, espera 2s |
-| Policía — RNMC medidas correctivas | `scripts/medidas_correctivas.py` | Ninguno (requiere fecha de expedición) | No |
+| Policía — RNMC medidas correctivas | `scripts/medidas_correctivas.py` | Ninguno (requiere fecha de expedición) | 2 intentos |
 | ADRES — afiliación EPS/BDUA | `scripts/adres.py` | reCAPTCHA (submit directo, sin validar token) | 3 intentos, espera progresiva |
 | RUAF — Registro Único de Afiliados | `scripts/ruaf.py` | Imagen/OCR (CapSolver `ImageToTextTask`, hasta 4 intentos internos de captcha) | 3 intentos, espera 3s — **EN PRUEBAS, descarga no garantizada** |
 
@@ -67,12 +67,12 @@ web_app/
 ├── main.py          # FastAPI: /api/submit, /api/status/{id}, /api/download/{id}, /api/download/{id}/{entidad}
 ├── runner.py        # Orquesta las 6 descargas con asyncio.as_completed + escritura incremental de status.json
 ├── scripts/         # Un módulo por entidad, cada uno expone descargar() async
-└── static/          # Frontend vanilla JS: formulario → polling cada 1.5s → estado granular + descarga individual o ZIP
+└── static/          # Frontend vanilla JS: formulario → polling cada 1.5s → estado granular + descarga individual o ZIP + mini-juego "Atrapa los certificados" mientras se espera
 ```
 
 **Flujo de un job:**
 1. `POST /api/submit` → valida cédula/fecha/nombre, crea UUID, inicializa `jobs/{uuid}/status.json` con todas las entidades en `"procesando"`, lanza `run_job()` en background
-2. `run_job()` ejecuta los 5 `descargar()` en paralelo con timeout de 180s cada uno (Semaphore(2) limita jobs concurrentes). Usa `asyncio.as_completed` para escribir el estado de cada entidad apenas termina, no al final
+2. `run_job()` ejecuta los 6 `descargar()` en paralelo con timeout de 300s cada uno (Semaphore(3) limita jobs concurrentes). Usa `asyncio.as_completed` para escribir el estado de cada entidad apenas termina, no al final
 3. `_update_status()` con `asyncio.Lock` garantiza escrituras atómicas a `status.json`
 4. Archivos exitosos se empaquetan en `certificados_{cedula}.zip` cuando todas las entidades terminan
 5. `GET /api/status/{uuid}` devuelve estado con `overall_status`, `resultados[entidad].status` y `download_url` por entidad lista
@@ -100,8 +100,12 @@ web_app/
 
 **Rate limiting:** `POST /api/submit` está limitado a 5 req/min por IP via `slowapi`.
 
+**Selector de entidades:** El frontend permite marcar/desmarcar entidades antes de enviar. El payload de `/api/submit` incluye `entidades: list[str]`; `main.py` filtra las tareas en `runner.py` según la lista recibida. RUAF viene marcado por defecto pero con label "en pruebas".
+
 **Variables de entorno (Railway):**
 - `CAPSOLVER_API_KEY` — usada por Policía y Contraloría. `runner.py` tiene un fallback hardcoded; en producción debe inyectarse desde Railway.
+- `LANDIGAI_API_KEY` — OCR alternativo para RUAF vía LandingAI (en desarrollo).
+- `LANDIGAI_API_URL` — URL del endpoint de LandingAI (por defecto `https://api.va.landing.ai/v1/ade/parse`).
 - `PORT` — inyectada automáticamente por Railway
 
 ## Firma de cada descargar()
@@ -112,7 +116,7 @@ contraloria.descargar(cedula, output_dir, capsolver_api_key)  -> str   # PDF o P
 procuraduria.descargar(cedula, primer_nombre, output_dir)     -> str   # PDF (nombre sugerido por el servidor)
 medidas_correctivas.descargar(cedula, dia, mes, anio, output_dir) -> str  # PDF o PNG
 adres.descargar(cedula, output_dir, tipo_doc="CC")            -> str   # PDF
-ruaf.descargar(cedula, dia, mes, anio, output_dir, capsolver_api_key) -> str  # PDF o PNG — EN PRUEBAS
+ruaf.descargar(cedula, dia, mes, anio, output_dir, capsolver_api_key, landigai_key, landigai_url) -> str  # PDF o PNG — EN PRUEBAS
 ```
 
 Todas retornan la ruta absoluta del archivo generado o lanzan `RuntimeError`.
@@ -161,4 +165,4 @@ Tiempo total bajó de ~90s a ~40s aplicando 3 patrones simultáneos:
 
 ## Deploy Railway
 
-El `railway.toml` apunta al Dockerfile en `web_app/Dockerfile`. Railway construye desde la raíz del repo, por eso el Dockerfile usa `COPY web_app/requirements.txt .` y `COPY web_app/ .`. La imagen base es `mcr.microsoft.com/playwright/python:v1.58.0-jammy` y `requirements.txt` pide `playwright>=1.58.0`. Si actualizas una, actualiza la otra.
+El `railway.toml` apunta al Dockerfile en `web_app/Dockerfile`. Railway construye desde la raíz del repo, por eso el Dockerfile usa `COPY web_app/requirements.txt .` y `COPY web_app/ .`. La imagen base es `mcr.microsoft.com/playwright/python:v1.59.0-jammy` y `requirements.txt` pide `playwright>=1.59.0`. Si actualizas una, actualiza la otra.

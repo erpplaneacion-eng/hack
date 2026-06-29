@@ -12,7 +12,9 @@ CAPSOLVER_API_KEY = os.getenv(
     "CAPSOLVER_API_KEY",
     "CAP-4630AE78E94762DF1C9E69E9DDACE200D1D979524936D4BA670B55E96585A975",
 )
-TIMEOUT_SEGUNDOS = 180
+LANDIGAI_API_KEY = os.getenv("LANDIGAI_API_KEY", "")
+LANDIGAI_API_URL = os.getenv("LANDIGAI_API_URL", "")
+TIMEOUT_SEGUNDOS = 300
 
 _semaforo = asyncio.Semaphore(3)
 _status_lock = asyncio.Lock()
@@ -72,7 +74,10 @@ async def run_job(job_id: str, job_dir: str, params: dict, entidades: list[str] 
         "procuraduria":        lambda: procuraduria.descargar(cedula, primer_nombre, job_dir),
         "medidas_correctivas": lambda: medidas_correctivas.descargar(cedula, dia, mes, anio, job_dir),
         "adres":               lambda: adres.descargar(cedula, job_dir),
-        "ruaf":                lambda: ruaf.descargar(cedula, dia, mes, anio, job_dir, CAPSOLVER_API_KEY),
+        "ruaf":                lambda: ruaf.descargar(
+            cedula, dia, mes, anio, job_dir, CAPSOLVER_API_KEY,
+            LANDIGAI_API_KEY or None, LANDIGAI_API_URL or None
+        ),
     }
 
     async with _semaforo:

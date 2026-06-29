@@ -2,8 +2,10 @@
 import asyncio
 import base64
 import os
+import re
 
 import capsolver
+import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import Stealth
 
@@ -33,8 +35,83 @@ def _resolver_captcha_imagen(api_key: str, imagen_base64: str) -> str:
     raise RuntimeError("CapSolver no pudo resolver el captcha de imagen de RUAF")
 
 
+def _resolver_captcha_landigai(parse_url: str, api_key: str, imagen_bytes: bytes) -> str:
+    """Resuelve captcha con LandingAI en 2 pasos: Parse (imagen) -> Extract (schema)."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    extract_url = parse_url.replace("/v1/ade/parse", "/v1/ade/extract")
+    schema = (
+        '{"type":"object","properties":{"captcha_text":{"type":"string"}},'
+        '"required":["captcha_text"]}'
+    )
+
+    ultimo_error = "sin respuesta válida de LandingAI"
+    try:
+        with httpx.Client(timeout=45.0) as client:
+            parse_files = {
+                "document": ("captcha.png", imagen_bytes, "image/png"),
+            }
+            parse_data = {
+                "model": "dpt-2-latest",
+            }
+            parse_resp = client.post(parse_url, headers=headers, files=parse_files, data=parse_data)
+            if parse_resp.status_code >= 400:
+                raise RuntimeError(f"parse HTTP {parse_resp.status_code}: {parse_resp.text[:300]}")
+            parse_body = parse_resp.json()
+            markdown = str((parse_body or {}).get("markdown") or "").strip()
+            if not markdown:
+                raise RuntimeError(f"parse sin markdown: {str(parse_body)[:300]}")
+
+            extract_files = {
+                "markdown": (None, markdown),
+            }
+            extract_data = {
+                "schema": schema,
+                "model": "extract-latest",
+                "strict": "false",
+            }
+            extract_resp = client.post(
+                extract_url,
+                headers=headers,
+                files=extract_files,
+                data=extract_data,
+            )
+        if extract_resp.status_code >= 400:
+            raise RuntimeError(f"extract HTTP {extract_resp.status_code}: {extract_resp.text[:300]}")
+
+        body = extract_resp.json()
+        extraction = body.get("extraction", {}) if isinstance(body, dict) else {}
+        candidates = [
+            extraction.get("captcha_text"),
+            extraction.get("captcha"),
+            extraction.get("text"),
+        ]
+        for c in candidates:
+            txt = str(c or "").strip()
+            if txt:
+                return txt
+        ultimo_error = f"extract sin campo usable: {str(body)[:300]}"
+    except Exception as e:
+        ultimo_error = str(e)
+
+    raise RuntimeError(f"LandingAI no pudo resolver captcha RUAF: {ultimo_error}")
+
+
+def _normalizar_captcha(texto: str) -> str:
+    """Normaliza OCR para RUAF: solo alfanumérico, mayúsculas."""
+    limpio = re.sub(r"[^A-Za-z0-9]", "", (texto or "").upper())
+    # RUAF suele usar 4-6 caracteres; si llega más largo, recortar.
+    if len(limpio) > 6:
+        limpio = limpio[:6]
+    return limpio
+
+
 async def _intentar_descarga(cedula: str, dia: str, mes: str, anio: str,
-                              output_dir: str, capsolver_api_key: str) -> str:
+                              output_dir: str, capsolver_api_key: str,
+                              landigai_api_key: str | None = None,
+                              landigai_api_url: str | None = None) -> str:
     print(f"[ruaf:{cedula}] inicio", flush=True)
 
     async with async_playwright() as p:
@@ -146,81 +223,127 @@ async def _intentar_descarga(cedula: str, dia: str, mes: str, anio: str,
             else:
                 # Fallback: campo único DD/MM/YYYY
                 campo_fecha = page.locator(
-                    "input[id*='Fecha'], input[id*='fecha'], input[id*='Expedicion']"
+                    "#MainContent_datepicker, "
+                    "input[id*='Fecha'], input[id*='fecha'], input[id*='Expedicion'], "
+                    "input[id*='datepicker'], input[name*='datepicker']"
                 ).first
                 if await campo_fecha.count() > 0:
                     await campo_fecha.fill(f"{dia}/{mes}/{anio}")
+                    # Cerrar datepicker flotante para que no bloquee clicks posteriores.
+                    await campo_fecha.press("Tab")
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(150)
             print(f"[ruaf:{cedula}] formulario-llenado", flush=True)
 
             # ── Pasos 3 y 4: Captcha → Verificar → Consultar (hasta 4 intentos) ──
             consultar_ok = False
             for intento_captcha in range(1, 5):
-                # Obtener imagen sin caché del navegador:
-                # fetch con cache:'no-store' garantiza que cada intento ve la imagen actual del servidor
-                imagen_b64 = await page.evaluate("""
-                    async () => {
-                        // Buscar por id/src; fallback: img más cercano al input del captcha
-                        let img = document.querySelector(
-                            'img[id*="Captcha"], img[id*="captcha"], ' +
-                            'img[src*="Captcha"], img[src*="captcha"], ' +
-                            'img[src*="Image"], img[src*="image"]'
-                        );
-                        if (!img) {
-                            const inp = document.getElementById('MainContent_txtCaptcha');
-                            if (inp) {
-                                let el = inp.parentElement;
-                                for (let i = 0; i < 6 && el; i++, el = el.parentElement) {
-                                    const found = el.querySelector('img');
-                                    if (found) { img = found; break; }
-                                }
-                            }
-                        }
-                        if (!img || !img.src || img.src.startsWith('data:')) {
-                            // Imagen embebida (data URI) — retornar src directamente
-                            if (img && img.src.startsWith('data:')) {
-                                return img.src.split(',')[1];
-                            }
-                            return null;
-                        }
-                        try {
-                            const r = await fetch(img.src, {
-                                cache: 'no-store',
-                                headers: {'Cache-Control': 'no-cache', 'Pragma': 'no-cache'}
-                            });
-                            const buf = await r.arrayBuffer();
-                            let bin = '';
-                            new Uint8Array(buf).forEach(b => bin += String.fromCharCode(b));
-                            return btoa(bin);
-                        } catch(e) { return null; }
-                    }
-                """)
+                # Captura robusta del captcha:
+                # 1) URL real de CaptchaImage.axd usando la misma sesión del navegador
+                # 2) Fallback a screenshot del elemento si la descarga falla
+                img_el = page.locator(
+                    "div[style*='background-color:White'] img[src*='CaptchaImage.axd'], "
+                    "img[src*='CaptchaImage.axd'], img[alt='Captcha'], "
+                    "img[id*='Captcha'], img[id*='captcha'], "
+                    "img[src*='Captcha'], img[src*='captcha']"
+                ).first
+                if await img_el.count() == 0:
+                    img_el = page.locator("#MainContent_txtCaptcha").locator("xpath=ancestor::tr[1]//img").first
 
-                if not imagen_b64:
-                    # Último recurso: screenshot del elemento
-                    img_el = page.locator(
-                        "img[id*='Captcha'], img[id*='captcha'], "
-                        "img[src*='Captcha'], img[src*='captcha']"
-                    ).first
-                    if await img_el.count() == 0:
-                        img_el = page.locator("#MainContent_txtCaptcha").locator("xpath=../img")
+                await img_el.wait_for(state="visible", timeout=10_000)
+                try:
+                    await page.wait_for_function(
+                        """(el) => !!el && el.complete && (el.naturalWidth || 0) > 0 && (el.naturalHeight || 0) > 0""",
+                        arg=await img_el.element_handle(),
+                        timeout=8_000,
+                    )
+                except Exception:
+                    pass
+
+                captcha_url = await img_el.evaluate(
+                    """(el) => {
+                        const src = (el.currentSrc || el.src || '').trim();
+                        return src || null;
+                    }"""
+                )
+
+                img_bytes = b""
+                if captcha_url and "CaptchaImage.axd" in captcha_url:
+                    try:
+                        resp = await context.request.get(
+                            captcha_url,
+                            headers={
+                                "Cache-Control": "no-cache",
+                                "Pragma": "no-cache",
+                            },
+                            timeout=15_000,
+                        )
+                        if resp.ok:
+                            ctype = (resp.headers.get("content-type") or "").lower()
+                            body = await resp.body()
+                            if ("image" in ctype) and len(body) > 500:
+                                img_bytes = body
+                    except Exception:
+                        img_bytes = b""
+
+                if not img_bytes:
                     img_bytes = await img_el.screenshot()
-                    imagen_b64 = base64.b64encode(img_bytes).decode()
+                imagen_b64 = base64.b64encode(img_bytes).decode()
 
                 # Guardar imagen de diagnóstico solo en el primer intento de cada ciclo externo
                 if intento_captcha == 1:
                     debug_path = os.path.join(output_dir, f"ruaf_captcha_{cedula}.png")
                     with open(debug_path, "wb") as _f:
-                        _f.write(base64.b64decode(imagen_b64))
+                        _f.write(img_bytes)
 
-                texto_captcha = await asyncio.to_thread(
-                    _resolver_captcha_imagen, capsolver_api_key, imagen_b64
-                )
+                if landigai_api_key and landigai_api_url:
+                    try:
+                        texto_captcha = await asyncio.to_thread(
+                            _resolver_captcha_landigai,
+                            landigai_api_url,
+                            landigai_api_key,
+                            img_bytes,
+                        )
+                    except Exception as e:
+                        print(f"[ruaf:{cedula}] LandigAI fallback a CapSolver: {e}", flush=True)
+                        texto_captcha = await asyncio.to_thread(
+                            _resolver_captcha_imagen, capsolver_api_key, imagen_b64
+                        )
+                else:
+                    texto_captcha = await asyncio.to_thread(
+                        _resolver_captcha_imagen, capsolver_api_key, imagen_b64
+                    )
+                texto_captcha = _normalizar_captcha(texto_captcha)
                 print(f"[ruaf:{cedula}] captcha-texto={texto_captcha!r} (intento {intento_captcha})", flush=True)
+
+                if not (4 <= len(texto_captcha) <= 6):
+                    print(
+                        f"[ruaf:{cedula}] captcha inválido por longitud ({len(texto_captcha)}), refrescando...",
+                        flush=True,
+                    )
+                    try:
+                        await page.locator("#MainContent_txtCaptcha").fill("")
+                        await img_el.click(timeout=3_000)
+                        await page.wait_for_timeout(600)
+                    except Exception:
+                        pass
+                    continue
 
                 await page.locator("#MainContent_txtCaptcha").fill(texto_captcha)
 
                 # Click Verificar — PostBack ASP.NET
-                await page.locator("#MainContent_btnVerify").click(timeout=10_000)
+                try:
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(100)
+                    await page.locator("#MainContent_btnVerify").click(timeout=10_000)
+                except Exception:
+                    # Fallback robusto para overlays (datepicker/elementos flotantes)
+                    await page.evaluate(
+                        """() => {
+                            const btn = document.querySelector('#MainContent_btnVerify');
+                            if (btn) btn.click();
+                        }"""
+                    )
                 await page.wait_for_load_state("domcontentloaded", timeout=15_000)
 
                 # Indicador de captcha correcto: btnConsultar queda habilitado
@@ -233,6 +356,12 @@ async def _intentar_descarga(cedula: str, dia: str, mes: str, anio: str,
                     break
 
                 print(f"[ruaf:{cedula}] captcha incorrecto (intento {intento_captcha}), reintentando...", flush=True)
+                try:
+                    await page.locator("#MainContent_txtCaptcha").fill("")
+                    await img_el.click(timeout=3_000)
+                    await page.wait_for_timeout(600)
+                except Exception:
+                    pass
 
             if not consultar_ok:
                 raise RuntimeError("RUAF: captcha incorrecto tras 4 intentos")
@@ -276,13 +405,24 @@ async def _intentar_descarga(cedula: str, dia: str, mes: str, anio: str,
 
 
 async def descargar(cedula: str, dia: str, mes: str, anio: str,
-                    output_dir: str, capsolver_api_key: str) -> str:
+                    output_dir: str, capsolver_api_key: str,
+                    landigai_api_key: str | None = None,
+                    landigai_api_url: str | None = None) -> str:
     """Retorna ruta del archivo generado."""
     os.makedirs(output_dir, exist_ok=True)
     ultimo_error: Exception = RuntimeError("Sin intentos realizados")
     for intento in range(1, 4):  # 3 intentos
         try:
-            return await _intentar_descarga(cedula, dia, mes, anio, output_dir, capsolver_api_key)
+            return await _intentar_descarga(
+                cedula,
+                dia,
+                mes,
+                anio,
+                output_dir,
+                capsolver_api_key,
+                landigai_api_key,
+                landigai_api_url,
+            )
         except Exception as e:
             ultimo_error = e
             print(f"[ruaf:{cedula}] intento {intento} falló: {e}", flush=True)
