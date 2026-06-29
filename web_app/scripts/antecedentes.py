@@ -3,9 +3,10 @@ import asyncio
 import os
 import re
 
-import capsolver
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import Stealth
+
+from ._captcha import resolver_recaptcha
 
 URL_INICIO     = "https://antecedentes.policia.gov.co:7005/WebJudicial/index.xhtml"
 URL_FORMULARIO = "https://antecedentes.policia.gov.co:7005/WebJudicial/antecedentes.xhtml"
@@ -17,29 +18,6 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-
-def _resolver_captcha(api_key: str, page_url: str = URL_FORMULARIO) -> str:
-    """Llama a CapSolver — síncrono, se ejecuta en thread."""
-    capsolver.api_key = api_key
-    for tipo in [
-        "ReCaptchaV2EnterpriseTaskProxyless",
-        "ReCaptchaV3TaskProxyless",
-        "ReCaptchaV2TaskProxyless",
-    ]:
-        payload = {"type": tipo, "websiteURL": page_url, "websiteKey": SITEKEY}
-        if tipo == "ReCaptchaV3TaskProxyless":
-            payload["pageAction"] = "verify"
-        for _intento in range(3):
-            try:
-                solution = capsolver.solve(payload)
-                token = solution.get("gRecaptchaResponse", "")
-                if token:
-                    return token
-                break  # token vacío → siguiente tipo
-            except Exception:
-                if _intento == 2:
-                    break  # agotó 3 intentos → siguiente tipo
-    raise RuntimeError("CapSolver no devolvió token para Policía antecedentes")
 
 
 async def _inyectar_token(page, token: str):
@@ -69,11 +47,11 @@ async def _inyectar_token(page, token: str):
 async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
     print(f"[antecedentes:{cedula}] inicio", flush=True)
 
-    # CapSolver en paralelo con la carga; timeout explícito de 90s para no comerse el budget global
+    # CapSolver → 2captcha en paralelo con la carga del browser; timeout 120s cubre el fallback
     captcha_task = asyncio.create_task(
         asyncio.wait_for(
-            asyncio.to_thread(_resolver_captcha, capsolver_api_key),
-            timeout=90,
+            asyncio.to_thread(resolver_recaptcha, SITEKEY, URL_FORMULARIO, capsolver_api_key),
+            timeout=120,
         )
     )
 
@@ -121,7 +99,7 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
             try:
                 token = await captcha_task
             except asyncio.TimeoutError:
-                raise RuntimeError("CapSolver timeout >90s")
+                raise RuntimeError("CAPTCHA timeout >120s (CapSolver + 2captcha)")
             print(f"[antecedentes:{cedula}] post-captcha-task", flush=True)
             # Esperar que el widget reCAPTCHA haya registrado sus callbacks antes de inyectar
             try:

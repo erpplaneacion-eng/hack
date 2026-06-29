@@ -2,9 +2,10 @@
 import asyncio
 import os
 
-import capsolver
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import Stealth
+
+from ._captcha import resolver_recaptcha
 
 URL_CAPTCHA = "https://cfiscal.contraloria.gov.co/Certificados/CertificadoPersonaNatural.aspx"
 SITEKEY        = "6LcfnjwUAAAAAIyl8ehhox7ZYqLQSVl_w1dmYIle"
@@ -16,33 +17,15 @@ USER_AGENT = (
 )
 
 
-def _resolver_captcha(api_key: str) -> str:
-    capsolver.api_key = api_key
-    for tipo in ["ReCaptchaV2EnterpriseTaskProxyless", "ReCaptchaV3TaskProxyless", "ReCaptchaV2TaskProxyless"]:
-        for _intento in range(3):
-            try:
-                payload = {"type": tipo, "websiteURL": URL_CAPTCHA, "websiteKey": SITEKEY}
-                if tipo == "ReCaptchaV3TaskProxyless":
-                    payload["pageAction"] = "submit"
-                solution = capsolver.solve(payload)
-                token = solution.get("gRecaptchaResponse", "")
-                if token:
-                    return token
-                break  # token vacío → siguiente tipo
-            except Exception:
-                if _intento == 2:
-                    break  # agotó 3 intentos → siguiente tipo
-    raise RuntimeError("CapSolver no pudo resolver el captcha de Contraloría")
-
 
 async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
     print(f"[contraloria:{cedula}] inicio", flush=True)
 
-    # CapSolver en paralelo desde el inicio; timeout 60s — CapSolver rara vez tarda más
+    # CapSolver → 2captcha en paralelo; timeout 120s cubre el fallback
     captcha_task = asyncio.create_task(
         asyncio.wait_for(
-            asyncio.to_thread(_resolver_captcha, capsolver_api_key),
-            timeout=60,
+            asyncio.to_thread(resolver_recaptcha, SITEKEY, URL_CAPTCHA, capsolver_api_key, "submit"),
+            timeout=120,
         )
     )
 
@@ -85,7 +68,7 @@ async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: st
             try:
                 token = await captcha_task
             except asyncio.TimeoutError:
-                raise RuntimeError("CapSolver timeout >60s")
+                raise RuntimeError("CAPTCHA timeout >120s (CapSolver + 2captcha)")
             print(f"[contraloria:{cedula}] post-captcha", flush=True)
 
             await page.evaluate("""
