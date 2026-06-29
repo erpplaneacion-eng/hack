@@ -104,6 +104,7 @@ web_app/
 
 **Variables de entorno (Railway):**
 - `CAPSOLVER_API_KEY` — usada por Policía y Contraloría. `runner.py` tiene un fallback hardcoded; en producción debe inyectarse desde Railway.
+- `TWOCAPTCHA_API_KEY` — fallback de CAPTCHA para Policía y Contraloría. Si CapSolver agota sus 3 tipos de tarea sin token, `scripts/_captcha.py` llama a 2captcha vía REST. Sin esta variable el fallback no activa y el comportamiento es igual al anterior. Obtener key en https://2captcha.com.
 - `LANDIGAI_API_KEY` — OCR alternativo para RUAF vía LandingAI (en desarrollo).
 - `LANDIGAI_API_URL` — URL del endpoint de LandingAI (por defecto `https://api.va.landing.ai/v1/ade/parse`).
 - `PORT` — inyectada automáticamente por Railway
@@ -131,7 +132,7 @@ Todas retornan la ruta absoluta del archivo generado o lanzan `RuntimeError`.
 
 ## Quirks importantes por entidad
 
-**Antecedentes / Contraloría (robustez)**: ambos módulos tienen 3 reintentos externos (`descargar()`) con `sleep(3)` entre ellos, igual al patrón de procuraduria/adres. Adicionalmente, `_resolver_captcha()` en ambos hace hasta 3 intentos por tipo de tarea de CapSolver antes de pasar al siguiente tipo. En `_inyectar_token()` de antecedentes se añadió la guarda `___grecaptcha_cfg.clients &&` antes de `Object.entries()` para evitar `TypeError` cuando el widget de reCAPTCHA aún no ha inicializado `.clients` al momento de la inyección (race condition entre CapSolver rápido y carga lenta del servidor colombiano).
+**Antecedentes / Contraloría (robustez)**: ambos módulos tienen 3 reintentos externos (`descargar()`) con `sleep(3)` entre ellos. La resolución de CAPTCHA está centralizada en `scripts/_captcha.py` → `resolver_recaptcha(sitekey, url, capsolver_key, page_action)`. Flujo: CapSolver prueba 3 tipos de tarea (`ReCaptchaV2Enterprise`, `ReCaptchaV3`, `ReCaptchaV2`) con 3 intentos cada uno; si agota todos sin token, cae a 2captcha vía REST (`TWOCAPTCHA_API_KEY`). Timeout del captcha subido de 60/90s a 120s para dar margen al fallback. En `_inyectar_token()` de antecedentes se añadió la guarda `___grecaptcha_cfg.clients &&` antes de `Object.entries()` para evitar `TypeError` cuando el widget de reCAPTCHA aún no ha inicializado `.clients` al momento de la inyección (race condition entre CapSolver rápido y carga lenta del servidor colombiano).
 
 **Contraloría**: el formulario vive en un iframe de `cfiscal.contraloria.gov.co`. La detección del frame usa `page.frame_locator("iframe[src*='cfiscal']")` + `wait_for` del elemento interno `#ddlTipoDocumento`, lo que garantiza que el frame ya está registrado en `page.frames` cuando se intenta acceder (reemplazó al loop `sleep(0.25) × 40` que tenía una race condition).
 
@@ -155,7 +156,7 @@ Tiempo total bajó de ~90s a ~40s aplicando 3 patrones simultáneos:
 - Scripts que descargan el PDF directo del servidor (`procuraduria.py`, `adres.py`): bloquean `image`, `media`, `font` (no afecta el PDF descargado).
 - Scripts que generan el PDF con `page.pdf()` desde la página renderizada (`antecedentes.py`, `contraloria.py`, `medidas_correctivas.py`): bloquean **sólo `media`**, porque imágenes y fuentes son necesarias para que aparezcan logos y tipografía.
 
-**2. CapSolver lanzado en paralelo** — en `antecedentes.py` y `contraloria.py` la sitekey es constante. Se llama `asyncio.create_task(asyncio.to_thread(_resolver_captcha, ...))` ANTES del `browser.launch()` y se hace `await captcha_task` justo antes de inyectar el token. Convierte ~10s secuenciales en `max(navegación, captcha)`.
+**2. CapSolver → 2captcha lanzado en paralelo** — en `antecedentes.py` y `contraloria.py` la sitekey es constante. Se llama `asyncio.create_task(asyncio.to_thread(resolver_recaptcha, ...))` ANTES del `browser.launch()` y se hace `await captcha_task` justo antes de inyectar el token. Convierte ~10s secuenciales en `max(navegación, captcha)`. La lógica de fallback vive en `scripts/_captcha.py`.
 
 **3. `wait_for_function` en lugar de `sleep` + polling** — todos los scripts reemplazan `wait_until="networkidle"` y bloques de `asyncio.sleep()` por:
 - `wait_until="domcontentloaded"` en los `goto`
