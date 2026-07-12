@@ -100,7 +100,7 @@ web_app/
 
 **Rate limiting:** `POST /api/submit` está limitado a 5 req/min por IP via `slowapi`.
 
-**Selector de entidades:** El frontend permite marcar/desmarcar entidades antes de enviar. El payload de `/api/submit` incluye `entidades: list[str]`; `main.py` filtra las tareas en `runner.py` según la lista recibida. RUAF viene marcado por defecto pero con label "en pruebas".
+**Selector de entidades:** El frontend permite marcar/desmarcar entidades antes de enviar. El payload de `/api/submit` incluye `entidades: list[str]`; `main.py` filtra las tareas en `runner.py` según la lista recibida. RUAF viene **desmarcado por defecto** (label "en prueba") porque su captcha OCR no es fiable — es opt-in explícito.
 
 **Variables de entorno (Railway):**
 - `CAPSOLVER_API_KEY` — usada por Policía y Contraloría. `runner.py` tiene un fallback hardcoded; en producción debe inyectarse desde Railway.

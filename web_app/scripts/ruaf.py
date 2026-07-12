@@ -9,6 +9,8 @@ import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import Stealth
 
+from ._captcha import resolver_imagen_2captcha
+
 URL_TERMINOS = "https://ruaf.sispro.gov.co/TerminosCondiciones.aspx"
 
 USER_AGENT = (
@@ -19,7 +21,7 @@ USER_AGENT = (
 
 
 def _resolver_captcha_imagen(api_key: str, imagen_base64: str) -> str:
-    """Resuelve captcha de imagen con CapSolver OCR — síncrono, se ejecuta en thread."""
+    """Resuelve captcha de imagen: CapSolver OCR → 2captcha fallback. Síncrono, en thread."""
     capsolver.api_key = api_key
     for _ in range(3):
         try:
@@ -32,7 +34,12 @@ def _resolver_captcha_imagen(api_key: str, imagen_base64: str) -> str:
                 return texto
         except Exception:
             pass
-    raise RuntimeError("CapSolver no pudo resolver el captcha de imagen de RUAF")
+
+    # Fallback 2captcha (solo si TWOCAPTCHA_API_KEY está configurada)
+    try:
+        return resolver_imagen_2captcha(imagen_base64)
+    except Exception as e:
+        raise RuntimeError(f"CapSolver y 2captcha fallaron el captcha de imagen de RUAF: {e}")
 
 
 def _resolver_captcha_landigai(parse_url: str, api_key: str, imagen_bytes: bytes) -> str:
@@ -141,7 +148,10 @@ async def _intentar_descarga(cedula: str, dia: str, mes: str, anio: str,
 
         try:
             # ── Paso 1: Términos y condiciones ──────────────────────────────
-            await page.goto(URL_TERMINOS, wait_until="domcontentloaded", timeout=30_000)
+            # ponytail: 60s (no 30s) porque en Railway 6 Chromium en paralelo saturan CPU
+            # y el goto de RUAF sufre contención; localmente carga en ~4s. Subir a per-job
+            # semaphore si la contención persiste.
+            await page.goto(URL_TERMINOS, wait_until="domcontentloaded", timeout=60_000)
             print(f"[ruaf:{cedula}] post-goto-terminos", flush=True)
 
             # Radio "Acepto" — buscar por value, id o label con texto "cepto"
@@ -296,7 +306,19 @@ async def _intentar_descarga(cedula: str, dia: str, mes: str, anio: str,
                     with open(debug_path, "wb") as _f:
                         _f.write(img_bytes)
 
-                if landigai_api_key and landigai_api_url:
+                # CapSolver falla este captcha devolviendo texto *incorrecto* (no vacío),
+                # así que su fallback interno nunca dispara. Tras 2 intentos fallidos de
+                # CapSolver, forzamos 2captcha directo en los intentos 3-4.
+                if intento_captcha >= 3:
+                    try:
+                        texto_captcha = await asyncio.to_thread(resolver_imagen_2captcha, imagen_b64)
+                        print(f"[ruaf:{cedula}] usando 2captcha (intento {intento_captcha})", flush=True)
+                    except Exception as e:
+                        print(f"[ruaf:{cedula}] 2captcha falló ({e}), cae a CapSolver", flush=True)
+                        texto_captcha = await asyncio.to_thread(
+                            _resolver_captcha_imagen, capsolver_api_key, imagen_b64
+                        )
+                elif landigai_api_key and landigai_api_url:
                     try:
                         texto_captcha = await asyncio.to_thread(
                             _resolver_captcha_landigai,
