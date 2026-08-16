@@ -5,7 +5,7 @@ import os
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import Stealth
 
-from ._captcha import resolver_recaptcha
+from ._captcha import resolver_recaptcha, ENTERPRISE
 
 URL_CAPTCHA = "https://cfiscal.contraloria.gov.co/Certificados/CertificadoPersonaNatural.aspx"
 SITEKEY        = "6LcfnjwUAAAAAIyl8ehhox7ZYqLQSVl_w1dmYIle"
@@ -21,10 +21,11 @@ USER_AGENT = (
 async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
     print(f"[contraloria:{cedula}] inicio", flush=True)
 
-    # CapSolver → 2captcha en paralelo; timeout 120s cubre el fallback
+    # CapSolver → 2captcha en paralelo. El presupuesto interno (110s) vence antes que
+    # el wait_for (120s), así el hilo termina solo en vez de quedar zombie en el pool.
     captcha_task = asyncio.create_task(
         asyncio.wait_for(
-            asyncio.to_thread(resolver_recaptcha, SITEKEY, URL_CAPTCHA, capsolver_api_key, "submit"),
+            asyncio.to_thread(resolver_recaptcha, SITEKEY, URL_CAPTCHA, capsolver_api_key, ENTERPRISE, 110),
             timeout=120,
         )
     )
@@ -156,13 +157,15 @@ async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str
     """Retorna ruta del archivo generado."""
     os.makedirs(output_dir, exist_ok=True)
     ultimo_error: Exception = RuntimeError("Sin intentos realizados")
-    for intento in range(1, 4):  # 3 intentos
+    # ponytail: 2 intentos, no 3. Con el timeout de 300s de runner.py, el tercero nunca
+    # alcanzaba a terminar (3 × 120s = 360s) — se pagaba la espera sin obtener el intento.
+    for intento in (1, 2):
         try:
             return await _intentar_descarga(cedula, output_dir, capsolver_api_key)
         except Exception as e:
             ultimo_error = e
             print(f"[contraloria:{cedula}] intento {intento} falló: {e}", flush=True)
-            if intento < 3:
+            if intento < 2:
                 msg = str(e).lower()
                 if "captcha inválido" in msg or "captcha no es válido" in msg:
                     await asyncio.sleep(5)
@@ -170,4 +173,4 @@ async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str
                     await asyncio.sleep(5)
                 else:
                     await asyncio.sleep(2)
-    raise RuntimeError(f"Contraloría falló tras 3 intentos. Último error: {ultimo_error}")
+    raise RuntimeError(f"Contraloría falló tras 2 intentos. Último error: {ultimo_error}")

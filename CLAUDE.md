@@ -11,8 +11,8 @@ Dos capas de código para el mismo propósito — descargar certificados de ante
 
 | Entidad | Módulo web_app | CAPTCHA | Reintentos |
 |---------|---------------|---------|------------|
-| Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | 3 intentos, espera 3s |
-| Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 Enterprise (CapSolver, lanzado en paralelo al `goto`, timeout 90s) | 3 intentos, espera 3s |
+| Policía — antecedentes judiciales | `scripts/antecedentes.py` | reCAPTCHA **v2 clásico** (CapSolver, lanzado en paralelo al `goto`, presupuesto 110s) | 2 intentos, espera 3-5s |
+| Contraloría General | `scripts/contraloria.py` | reCAPTCHA v2 **Enterprise** (CapSolver, lanzado en paralelo al `goto`, presupuesto 110s) | 2 intentos, espera 2-5s |
 | Procuraduría General | `scripts/procuraduria.py` | Texto (resuelto localmente) | 2 intentos, espera 2s |
 | Policía — RNMC medidas correctivas | `scripts/medidas_correctivas.py` | Ninguno (requiere fecha de expedición) | 2 intentos |
 | ADRES — afiliación EPS/BDUA | `scripts/adres.py` | reCAPTCHA (submit directo, sin validar token) | 3 intentos, espera progresiva |
@@ -104,7 +104,7 @@ web_app/
 
 **Variables de entorno (Railway):**
 - `CAPSOLVER_API_KEY` — usada por Policía y Contraloría. `runner.py` tiene un fallback hardcoded; en producción debe inyectarse desde Railway.
-- `TWOCAPTCHA_API_KEY` — fallback de CAPTCHA para Policía y Contraloría. Si CapSolver agota sus 3 tipos de tarea sin token, `scripts/_captcha.py` llama a 2captcha vía REST. Sin esta variable el fallback no activa y el comportamiento es igual al anterior. Obtener key en https://2captcha.com.
+- `TWOCAPTCHA_API_KEY` — fallback de CAPTCHA para Policía y Contraloría. Si CapSolver agota sus 2 intentos sin token, `scripts/_captcha.py` llama a 2captcha vía REST con el tiempo que quede del presupuesto. Sin esta variable el fallback no activa. Obtener key en https://2captcha.com.
 - `LANDIGAI_API_KEY` — OCR alternativo para RUAF vía LandingAI (en desarrollo).
 - `LANDIGAI_API_URL` — URL del endpoint de LandingAI (por defecto `https://api.va.landing.ai/v1/ade/parse`).
 - `PORT` — inyectada automáticamente por Railway
@@ -132,9 +132,17 @@ Todas retornan la ruta absoluta del archivo generado o lanzan `RuntimeError`.
 
 ## Quirks importantes por entidad
 
-**Antecedentes / Contraloría (robustez)**: ambos módulos tienen 3 reintentos externos (`descargar()`) con `sleep(3)` entre ellos. La resolución de CAPTCHA está centralizada en `scripts/_captcha.py` → `resolver_recaptcha(sitekey, url, capsolver_key, page_action)`. Flujo: CapSolver prueba 3 tipos de tarea (`ReCaptchaV2Enterprise`, `ReCaptchaV3`, `ReCaptchaV2`) con 3 intentos cada uno; si agota todos sin token, cae a 2captcha vía REST (`TWOCAPTCHA_API_KEY`). Timeout del captcha subido de 60/90s a 120s para dar margen al fallback. En `_inyectar_token()` de antecedentes se añadió la guarda `___grecaptcha_cfg.clients &&` antes de `Object.entries()` para evitar `TypeError` cuando el widget de reCAPTCHA aún no ha inicializado `.clients` al momento de la inyección (race condition entre CapSolver rápido y carga lenta del servidor colombiano).
+**Antecedentes / Contraloría (robustez)**: ambos módulos tienen 2 reintentos externos (`descargar()`). Son 2 y no 3 porque `runner.py` corta a los 300s: con 3 × 120s el tercer intento nunca alcanzaba a terminar y sólo se pagaba la espera.
 
-**Contraloría**: el formulario vive en un iframe de `cfiscal.contraloria.gov.co`. La detección del frame usa `page.frame_locator("iframe[src*='cfiscal']")` + `wait_for` del elemento interno `#ddlTipoDocumento`, lo que garantiza que el frame ya está registrado en `page.frames` cuando se intenta acceder (reemplazó al loop `sleep(0.25) × 40` que tenía una race condition).
+La resolución de CAPTCHA está centralizada en `scripts/_captcha.py` → `resolver_recaptcha(sitekey, url, capsolver_key, tipo, presupuesto_s)`. Tres reglas que no son obvias:
+
+- **El tipo de tarea es propiedad del sitio, no algo a descubrir en runtime.** Contraloría es `ENTERPRISE`, Policía es `V2` clásico. Cruzarlos produce un token que CapSolver entrega sin error pero que el servidor rechaza con `'<token>' does not match the displayed text`. `ReCaptchaV3` devuelve *"wrong captcha type"* en ambas sitekeys — no sirve para ninguna.
+- **`presupuesto_s` (110s) es un techo duro dentro del hilo**, y vence antes que el `asyncio.wait_for` (120s) del llamador. Necesario porque `asyncio.to_thread` **no se puede cancelar**: sin el presupuesto, el hilo sigue vivo tras el timeout y ocupa un slot del pool, lo que hace que los jobs siguientes esperen en cola y agoten su propio reloj sin haber empezado.
+- **Un solo tipo, 2 intentos, y luego 2captcha.** La cascada anterior (3 tipos × 3 intentos) consumía el presupuesto entero, así que el fallback a 2captcha nunca llegaba a ejecutarse.
+
+Los fallos de CapSolver se imprimen como `[captcha] CapSolver falló (intento N): <error>` — ahí aparece `ERROR_KEY_DOES_NOT_EXIST` si la key inyectada en Railway está muerta. En `_inyectar_token()` de antecedentes se añadió la guarda `___grecaptcha_cfg.clients &&` antes de `Object.entries()` para evitar `TypeError` cuando el widget de reCAPTCHA aún no ha inicializado `.clients` al momento de la inyección (race condition entre CapSolver rápido y carga lenta del servidor colombiano).
+
+**Contraloría**: el formulario vive en un iframe de `cfiscal.contraloria.gov.co`, pero el script ya **no** lo trata como iframe: navega directo a `CertificadoPersonaNatural.aspx` (la URL interna del frame) y espera `#ddlTipoDocumento`. Eso eliminó tanto el `frame_locator` como el loop `sleep(0.25) × 40` que tenía una race condition.
 
 **Procuraduría**: `resolver_captcha()` resuelve por regex 5 tipos de pregunta (matemáticas, dígitos de cédula, letras del nombre, capitales de departamento incluyendo "Colombia" → "Bogota"). Si llega una pregunta no reconocida lanza `ValueError`. Espera `#btnDescargar` (timeout 60s — server-side, no se puede acelerar) para confirmar éxito antes de intentar descargar.
 

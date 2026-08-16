@@ -6,7 +6,7 @@ import re
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import Stealth
 
-from ._captcha import resolver_recaptcha
+from ._captcha import resolver_recaptcha, V2
 
 URL_INICIO     = "https://antecedentes.policia.gov.co:7005/WebJudicial/index.xhtml"
 URL_FORMULARIO = "https://antecedentes.policia.gov.co:7005/WebJudicial/antecedentes.xhtml"
@@ -47,10 +47,12 @@ async def _inyectar_token(page, token: str):
 async def _intentar_descarga(cedula: str, output_dir: str, capsolver_api_key: str) -> str:
     print(f"[antecedentes:{cedula}] inicio", flush=True)
 
-    # CapSolver → 2captcha en paralelo con la carga del browser; timeout 120s cubre el fallback
+    # CapSolver → 2captcha en paralelo con la carga del browser. El presupuesto interno
+    # (110s) vence antes que el wait_for (120s), así el hilo termina solo en vez de
+    # quedar zombie en el pool ocupando un slot para los jobs siguientes.
     captcha_task = asyncio.create_task(
         asyncio.wait_for(
-            asyncio.to_thread(resolver_recaptcha, SITEKEY, URL_FORMULARIO, capsolver_api_key),
+            asyncio.to_thread(resolver_recaptcha, SITEKEY, URL_FORMULARIO, capsolver_api_key, V2, 110),
             timeout=120,
         )
     )
@@ -194,18 +196,18 @@ async def descargar(cedula: str, output_dir: str, capsolver_api_key: str) -> str
     """Retorna ruta del archivo generado."""
     os.makedirs(output_dir, exist_ok=True)
     ultimo_error: Exception = RuntimeError("Sin intentos realizados")
-    for intento in range(1, 4):  # 3 intentos
+    # ponytail: 2 intentos, no 3. Con el timeout de 300s de runner.py el tercero nunca
+    # alcanzaba a terminar (3 × 120s = 360s) — se pagaba la espera sin obtener el intento.
+    for intento in (1, 2):
         try:
             return await _intentar_descarga(cedula, output_dir, capsolver_api_key)
         except Exception as e:
             ultimo_error = e
             print(f"[antecedentes:{cedula}] intento {intento} falló: {e}", flush=True)
-            if intento < 3:
+            if intento < 2:
                 msg = str(e).lower()
                 if "captcha inválido" in msg or "captcha no es válido" in msg:
-                    await asyncio.sleep(8)
-                elif "timeout" in msg:
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(5)
                 else:
                     await asyncio.sleep(3)
-    raise RuntimeError(f"Antecedentes falló tras 3 intentos. Último error: {ultimo_error}")
+    raise RuntimeError(f"Antecedentes falló tras 2 intentos. Último error: {ultimo_error}")
