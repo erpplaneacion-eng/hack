@@ -104,7 +104,7 @@ web_app/
 
 **Variables de entorno (Railway):**
 - `CAPSOLVER_API_KEY` — usada por Policía y Contraloría. `runner.py` tiene un fallback hardcoded; en producción debe inyectarse desde Railway.
-- `TWOCAPTCHA_API_KEY` — fallback de CAPTCHA para Policía y Contraloría. Si CapSolver agota sus 2 intentos sin token, `scripts/_captcha.py` llama a 2captcha vía REST con el tiempo que quede del presupuesto. Sin esta variable el fallback no activa. Obtener key en https://2captcha.com.
+- `TWOCAPTCHA_API_KEY` — fallback de CAPTCHA para Policía y Contraloría. Si CapSolver falla o agota su mitad del presupuesto, `scripts/_captcha.py` llama a 2captcha vía REST con el tiempo restante. Sin esta variable el fallback no activa. Verificado end-to-end: con CapSolver caído, Contraloría descarga vía 2captcha en ~164s. Obtener key en https://2captcha.com.
 - `LANDIGAI_API_KEY` — OCR alternativo para RUAF vía LandingAI (en desarrollo).
 - `LANDIGAI_API_URL` — URL del endpoint de LandingAI (por defecto `https://api.va.landing.ai/v1/ade/parse`).
 - `PORT` — inyectada automáticamente por Railway
@@ -138,7 +138,8 @@ La resolución de CAPTCHA está centralizada en `scripts/_captcha.py` → `resol
 
 - **El tipo de tarea es propiedad del sitio, no algo a descubrir en runtime.** Contraloría es `ENTERPRISE`, Policía es `V2` clásico. Cruzarlos produce un token que CapSolver entrega sin error pero que el servidor rechaza con `'<token>' does not match the displayed text`. `ReCaptchaV3` devuelve *"wrong captcha type"* en ambas sitekeys — no sirve para ninguna.
 - **`presupuesto_s` (110s) es un techo duro dentro del hilo**, y vence antes que el `asyncio.wait_for` (120s) del llamador. Necesario porque `asyncio.to_thread` **no se puede cancelar**: sin el presupuesto, el hilo sigue vivo tras el timeout y ocupa un slot del pool, lo que hace que los jobs siguientes esperen en cola y agoten su propio reloj sin haber empezado.
-- **Un solo tipo, 2 intentos, y luego 2captcha.** La cascada anterior (3 tipos × 3 intentos) consumía el presupuesto entero, así que el fallback a 2captcha nunca llegaba a ejecutarse.
+- **CapSolver se llama por REST (`createTask` + polling propio), no con el SDK `capsolver`.** El SDK es la causa original de los `CAPTCHA timeout >120s`: su `getTask()` poolea 60 ciclos de 1s **sin timeout configurable** (`capsolver/capsolver.py:22`), así que un captcha que no sale rápido bloquea ~120s y no deja tiempo al fallback. `_capsolver()` reparte: la mitad del presupuesto (máx. 50s) para CapSolver, el resto para 2captcha. `ruaf.py` todavía usa el SDK — por eso la dependencia sigue en `requirements.txt`.
+- **Un solo intento por proveedor.** Reintentar al mismo servicio que acaba de fallar rinde menos que darle ese tiempo a 2captcha, que es un proveedor distinto.
 
 Los fallos de CapSolver se imprimen como `[captcha] CapSolver falló (intento N): <error>` — ahí aparece `ERROR_KEY_DOES_NOT_EXIST` si la key inyectada en Railway está muerta. En `_inyectar_token()` de antecedentes se añadió la guarda `___grecaptcha_cfg.clients &&` antes de `Object.entries()` para evitar `TypeError` cuando el widget de reCAPTCHA aún no ha inicializado `.clients` al momento de la inyección (race condition entre CapSolver rápido y carga lenta del servidor colombiano).
 

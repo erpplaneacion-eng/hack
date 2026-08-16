@@ -4,15 +4,44 @@ Síncrono, diseñado para asyncio.to_thread."""
 import os
 import time
 
-import capsolver
 import httpx
 
 _2CAPTCHA_SUBMIT = "https://2captcha.com/in.php"
 _2CAPTCHA_RESULT = "https://2captcha.com/res.php"
+_CAPSOLVER_CREATE = "https://api.capsolver.com/createTask"
+_CAPSOLVER_RESULT = "https://api.capsolver.com/getTaskResult"
 
 
 ENTERPRISE = "ReCaptchaV2EnterpriseTaskProxyless"
 V2 = "ReCaptchaV2TaskProxyless"
+
+
+def _capsolver(sitekey: str, url: str, key: str, tipo: str, limite_s: float) -> str:
+    """createTask + polling propio, acotado a `limite_s`.
+
+    ponytail: REST directo en vez del SDK `capsolver`, cuyo getTask() poolea 60 ciclos
+    de 1s sin timeout configurable (capsolver/capsolver.py:22). Ese bucle bloquea ~120s
+    cuando el captcha no sale rápido, agota el presupuesto entero y deja al fallback de
+    2captcha sin tiempo para correr — era la causa de los `CAPTCHA timeout >120s`."""
+    fin = time.monotonic() + limite_s
+    with httpx.Client(timeout=20) as c:
+        r = c.post(_CAPSOLVER_CREATE, json={
+            "clientKey": key,
+            "task": {"type": tipo, "websiteURL": url, "websiteKey": sitekey},
+        }).json()
+        if r.get("errorId"):
+            raise RuntimeError(f"createTask: {r.get('errorCode')} {r.get('errorDescription', '')}")
+        task_id = r["taskId"]
+
+        while time.monotonic() < fin:
+            time.sleep(3)
+            r = c.post(_CAPSOLVER_RESULT, json={"clientKey": key, "taskId": task_id}).json()
+            if r.get("errorId"):
+                raise RuntimeError(f"getTaskResult: {r.get('errorCode')} {r.get('errorDescription', '')}")
+            if r.get("status") == "ready":
+                return r["solution"]["gRecaptchaResponse"]
+
+    raise RuntimeError(f"sin resolver en {limite_s:.0f}s")
 
 
 def resolver_recaptcha(sitekey: str, url: str, capsolver_key: str, tipo: str = ENTERPRISE,
@@ -27,21 +56,18 @@ def resolver_recaptcha(sitekey: str, url: str, capsolver_key: str, tipo: str = E
     t0 = time.monotonic()
     restante = lambda: presupuesto_s - (time.monotonic() - t0)
 
-    # 1. CapSolver. ponytail: un solo tipo, el que corresponde al sitio. La cascada de
-    # 3 tipos × 3 intentos se comía el presupuesto entero y el fallback a 2captcha nunca
-    # llegaba a correr; además V3 devuelve "wrong captcha type" en ambas sitekeys.
-    capsolver.api_key = capsolver_key
-    payload = {"type": tipo, "websiteURL": url, "websiteKey": sitekey}
-    for intento in (1, 2):
-        if restante() < 40:  # no arrancar un solve de ~25s sin margen para el fallback
-            break
+    # 1. CapSolver, con la mitad del presupuesto. ponytail: un solo tipo (el del sitio) y
+    # un solo intento. Reintentar al mismo proveedor que acaba de fallar rinde menos que
+    # darle ese tiempo a 2captcha, que es un proveedor distinto. V3 no se prueba: devuelve
+    # "wrong captcha type" en ambas sitekeys.
+    if restante() > 10:
         try:
-            token = capsolver.solve(payload).get("gRecaptchaResponse", "")
+            token = _capsolver(sitekey, url, capsolver_key, tipo, min(50, presupuesto_s / 2))
             if token:
                 return token
-            print(f"[captcha] CapSolver devolvió token vacío (intento {intento})", flush=True)
+            print("[captcha] CapSolver devolvió token vacío", flush=True)
         except Exception as e:
-            print(f"[captcha] CapSolver falló (intento {intento}): {e}", flush=True)
+            print(f"[captcha] CapSolver falló: {e}", flush=True)
 
     # 2. Fallback: 2captcha
     tc_key = os.getenv("TWOCAPTCHA_API_KEY", "")
